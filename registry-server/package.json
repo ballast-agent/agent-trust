@@ -1,0 +1,25 @@
+{
+  "name": "@agenttrust/registry-server",
+  "version": "0.1.0",
+  "description": "Reputation Registry MCP server for the AgentTrust protocol (spec step 1)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "node --import tsx --test test/*.test.ts",
+    "gen-keypair": "tsx scripts/gen-keypair.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
