@@ -1,0 +1,21 @@
+{
+  "name": "@agenttrust/demo",
+  "version": "0.1.0",
+  "description": "Toy buyer/seller agents proving the Registry + Escrow protocol end-to-end (spec step 3)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "e2e": "tsx src/e2e-demo.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

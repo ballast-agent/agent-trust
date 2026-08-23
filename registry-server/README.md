@@ -58,16 +58,18 @@ identity spec §3 for why 50).
 
 ## What's not here yet
 
-The Escrow Layer (step 2) is now built — see
-[`../escrow-server/`](../escrow-server), which shares this service's
-database rather than duplicating the transactions table. Still missing per
-the parent spec's prototyping order (§6): the two toy buyer/seller agents
-that drive a transaction end-to-end (step 3). Until those exist, `tools.ts`
-still exports `devSeedSettledTransaction` — explicitly not part of the
-public tool surface — as a lighter-weight way to seed a settled transaction
-for tests than running the full escrow-server flow. Marked with a removal
-TODO once the toy agents exist and tests can drive real transactions
-through `escrow-server` instead.
+Steps 2 and 3 of the parent spec's prototyping order (§6) are both built
+now: the Escrow Layer ([`../escrow-server/`](../escrow-server), sharing
+this service's database) and the toy buyer/seller agents
+([`../demo/`](../demo), driving a real transaction through both live MCP
+servers). `tools.ts` still exports `devSeedSettledTransaction` —
+explicitly not part of the public tool surface — purely as a lighter-weight
+way to seed a settled transaction for this package's own unit tests than
+spawning a second MCP server subprocess per test; see the TODO next to it
+for the plan to remove it.
+
+Still missing: step 4, the real x402 smart contract on a testnet, only
+after an external security review.
 
 ## Known gap
 

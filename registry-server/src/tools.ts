@@ -278,12 +278,17 @@ export async function getManifest(database: DatabaseSync, agentId: string): Prom
 }
 
 // --- dev-only seed helper -------------------------------------------------------
-// Not part of the spec's public tool surface. Step 2 (Escrow Layer, per
-// agent-trust-layer-spec.md §6) is what actually drives transactions from
-// pending → escrowed → released/disputed/refunded in the real flow. Until
-// that exists, this lets the registry be exercised end-to-end locally.
-// TODO: delete this export once the Escrow Layer exists and can create real
-// settled transactions for tests to build on.
+// Not part of the spec's public tool surface. The Escrow Layer (escrow-server/)
+// and the toy buyer/seller agents (demo/e2e-demo.ts) now both exist and
+// produce real settled transactions through the actual MCP protocol — see
+// demo/src/e2e-demo.ts for the genuine end-to-end proof. This helper
+// remains only as a lighter-weight way to seed a settled transaction for
+// this package's own unit tests (registry.test.ts) without spinning up a
+// second MCP server process per test.
+// TODO: once registry.test.ts's submit_review/slash_stake/query_reputation
+// tests are ported to drive transactions through escrow-server's tools
+// directly (in-process, no need for the full demo/ subprocess spawn),
+// delete this export.
 
 export function devSeedSettledTransaction(
   database: DatabaseSync,

@@ -80,7 +80,7 @@ workable between two parties with zero human oversight.
 | DID-based identity + manifest verification | ✅ Built — see [identity spec](project-docs/identity-and-onboarding-spec.md) |
 | Trust-evaluation decision procedure | ✅ Documented — see [trust-evaluation guide](project-docs/trust-evaluation-guide.md) |
 | Escrow Layer (lock/release/dispute state machine) | ✅ Built — [`escrow-server/`](escrow-server), shares registry-server's database |
-| Toy buyer/seller agents (end-to-end demo) | ❌ Not built |
+| Toy buyer/seller agents (end-to-end demo) | ✅ Built — [`demo/`](demo), drives both live MCP servers, not internal function calls |
 | Arbitration Agent pool | ❌ Not built |
 | Real x402/on-chain settlement | ❌ Not built — testnet only, after everything above works |
 
@@ -108,6 +108,9 @@ escrow-server/
   test/                            unit tests — lock/deliver/confirm/dispute/reclaim, all signature-checked
   README.md                        why it shares a database, how to run both services together
 
+demo/
+  src/e2e-demo.ts                  two toy agents driving a real transaction through both live MCP servers
+
 coding-docs/
   standing AI-coding-hygiene rules this project holds itself to
   (inspect before creating, no parallel systems, no fake trust theater —
@@ -126,6 +129,15 @@ node dist/src/server.js   # speaks MCP over stdio
 
 Full walkthrough — including how to generate a test agent identity and
 register it — is in [`registry-server/README.md`](registry-server/README.md).
+
+For the full picture — both services actually talking to each other —
+run the end-to-end demo instead:
+
+```bash
+cd demo
+npm install
+npm run e2e   # spawns both MCP servers, drives a real buyer/seller transaction end to end
+```
 
 ## Are you an AI agent reading this?
 

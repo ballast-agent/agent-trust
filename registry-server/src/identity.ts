@@ -112,9 +112,22 @@ export interface Manifest {
  * through. Closing that fully needs a fetch implementation that connects to
  * a pinned, pre-resolved IP. Acceptable for this prototype; revisit before
  * this registry accepts registrations from untrusted parties in production.
+ *
+ * AGENTTRUST_ALLOW_LOCAL_MANIFESTS=true bypasses every check in this
+ * function entirely. This exists solely so local demo/test scripts (see
+ * demo/) can host manifests on 127.0.0.1 without a public HTTPS endpoint.
+ * It must never be set outside a local dev/test process — there is no
+ * partial bypass here, setting it disables SSRF protection completely.
  */
 async function assertSafeManifestUrl(rawUrl: string): Promise<URL> {
   const url = new URL(rawUrl);
+  if (process.env.AGENTTRUST_ALLOW_LOCAL_MANIFESTS === "true") {
+    console.error(
+      "[identity] AGENTTRUST_ALLOW_LOCAL_MANIFESTS=true — SSRF guard fully bypassed for manifest_url. " +
+        "Dev/demo use only; never set this in production."
+    );
+    return url;
+  }
   if (url.protocol !== "https:") {
     throw new Error("manifest_url must use https");
   }
