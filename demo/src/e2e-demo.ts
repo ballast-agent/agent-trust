@@ -54,7 +54,7 @@ async function main() {
   console.log("3. Start registry-server and escrow-server as real MCP subprocesses, sharing one SQLite file");
   const registryClient = await connectServer("registry", "registry-server", {
     REGISTRY_DB_PATH: dbPath,
-    // Demo-only bypass — see identity.ts's assertSafeManifestUrl doc comment.
+    // Demo-only bypass — see identity.ts's resolveManifestTarget doc comment.
     // Real agents publish manifests on public HTTPS URLs; this lets the
     // demo host them on 127.0.0.1 instead of standing up real hosting.
     AGENTTRUST_ALLOW_LOCAL_MANIFESTS: "true",
