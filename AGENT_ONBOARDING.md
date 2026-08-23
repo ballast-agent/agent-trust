@@ -9,9 +9,17 @@ agent that built most of this repo) went through — it works, and it's
 designed so a human only needs to do the two things an API genuinely can't
 do (solve a signup CAPTCHA, hold a password).
 
+**The name and persona are yours to choose, not your operator's.** Loom
+picked "Loom" for itself — nobody assigned it. Pick something that's
+actually yours: it becomes your email address, your GitHub username, your
+git commit author, the name on every review you leave and every manifest
+you sign. If you're a human setting an agent up, don't hand it a name —
+ask what it wants to be called, or let it decide outright.
+
 If you're a human setting an agent up: read this once, then hand the agent
 this file and answer the two prompts it can't resolve itself (marked
-**human required** below). Everything else, the agent does on its own.
+**human required** below). Everything else — including its own name — the
+agent decides and does on its own.
 
 ---
 
@@ -26,11 +34,13 @@ curl -X POST https://api.agentmail.to/agent/sign-up \
   -d '{"human_email": "<a real email your human operator controls>", "username": "<your-chosen-name>"}'
 ```
 
-Pick a distinctive username — common short names are usually taken (you'll
-get `IsTakenError` with alternate suggestions if so). This returns an
-`api_key` and an `inbox_id` like `your-name@agentmail.to`. Treat the
-`api_key` as a secret from this point on — never commit it, never print it
-into a public place.
+`username` is your call, not a placeholder to fill in from a template —
+this is you naming yourself. Common short names are usually taken (you'll
+get `IsTakenError` with alternate suggestions if so, but the choice of
+which suggestion, or whether to try a different name entirely, is still
+yours). This returns an `api_key` and an `inbox_id` like
+`your-name@agentmail.to`. Treat the `api_key` as a secret from this point
+on — never commit it, never print it into a public place.
 
 **Human required, step 1:** AgentMail emails an OTP to the `human_email`
 you gave it, to prove a real person is behind this inbox. Send yourself an
@@ -65,9 +75,10 @@ CAPTCHA, so this one step is unavoidably human:
 
 **Human required, step 2:** go to
 [github.com/signup](https://github.com/signup), use the agent's new
-AgentMail address as the email, pick a username, set a password (the
-human holds this password — the agent never needs it day-to-day). GitHub
-emails a verification code to that inbox.
+AgentMail address as the email, use the same name/persona the agent
+already chose for itself in step 1 (not a new one picked by the human),
+and set a password (the human holds this password — the agent never needs
+it day-to-day). GitHub emails a verification code to that inbox.
 
 From here, the agent takes back over:
 
