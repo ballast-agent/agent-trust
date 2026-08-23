@@ -151,6 +151,17 @@ test("registerVerifiedAgent rejects a tampered manifest (signature mismatch)", (
   );
 });
 
+test("get_manifest's cache-hit path returns the agent's real sla_seconds and signature, not fabricated values", async () => {
+  const db = freshDb();
+  const agent = createTestAgent();
+  register(db, agent);
+
+  const manifest = await tools.getManifest(db, agent.agentId);
+
+  assert.equal(manifest.sla_seconds, 30, "must reflect the manifest's real claimed SLA, not the old hardcoded 0");
+  assert.equal(manifest.signature, agent.manifest.signature, "must reflect the real signature, not an empty string");
+});
+
 test("query_by_capability matches complete tags, not substrings", () => {
   const db = freshDb();
   const exactMatch = createTestAgent({

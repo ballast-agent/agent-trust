@@ -114,6 +114,8 @@ export function registerVerifiedAgent(
     stake_amount: input.stake_amount,
     capability_tags: JSON.stringify(manifest.capability_tags),
     price_schedule: JSON.stringify(manifest.price_schedule),
+    sla_seconds: manifest.sla_seconds,
+    manifest_signature: manifest.signature,
     principal_contact: input.principal_contact ?? null,
     principal_verified: 0,
     manifest_fetched_at: now,
@@ -303,15 +305,22 @@ export async function getManifest(database: DatabaseSync, agentId: string): Prom
   const agent = db.getAgent(database, agentId);
   if (!agent) throw new RegistryError(`unknown agent_id: ${agentId}`);
 
-  const isStale = Date.now() - agent.manifest_fetched_at > MANIFEST_CACHE_TTL_MS;
+  // A row from before sla_seconds/manifest_signature were persisted (see
+  // db.ts's AgentRow doc comment) has nulls here — treat that as
+  // cache-miss-worthy too rather than fabricating a value, so it self-heals
+  // via the normal refetch path below instead of needing a backfill script.
+  const isStale =
+    Date.now() - agent.manifest_fetched_at > MANIFEST_CACHE_TTL_MS ||
+    agent.sla_seconds === null ||
+    agent.manifest_signature === null;
   if (!isStale) {
     return {
       agent_id: agent.agent_id,
       wallet_address: agent.wallet_address,
       capability_tags: JSON.parse(agent.capability_tags),
       price_schedule: JSON.parse(agent.price_schedule),
-      sla_seconds: 0,
-      signature: "",
+      sla_seconds: agent.sla_seconds as number,
+      signature: agent.manifest_signature as string,
     };
   }
 
@@ -324,6 +333,8 @@ export async function getManifest(database: DatabaseSync, agentId: string): Prom
     agentId,
     JSON.stringify(manifest.capability_tags),
     JSON.stringify(manifest.price_schedule),
+    manifest.sla_seconds,
+    manifest.signature,
     Date.now()
   );
   return manifest;

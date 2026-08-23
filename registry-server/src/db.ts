@@ -25,6 +25,12 @@ export interface AgentRow {
   stake_amount: number;
   capability_tags: string; // JSON array, cached from last verified manifest fetch
   price_schedule: string; // JSON object, cached from last verified manifest fetch
+  // Cached from the same verified manifest fetch as capability_tags/price_schedule.
+  // Nullable only for rows inserted before this column existed — get_manifest
+  // treats a null here as cache-miss-worthy rather than fabricating a value
+  // (see getManifest's isStale check in tools.ts).
+  sla_seconds: number | null;
+  manifest_signature: string | null;
   principal_contact: string | null;
   principal_verified: 0 | 1;
   manifest_fetched_at: number;
@@ -84,6 +90,8 @@ CREATE TABLE IF NOT EXISTS agents (
   stake_amount REAL NOT NULL,
   capability_tags TEXT NOT NULL,
   price_schedule TEXT NOT NULL,
+  sla_seconds REAL,
+  manifest_signature TEXT,
   principal_contact TEXT,
   principal_verified INTEGER NOT NULL DEFAULT 0,
   manifest_fetched_at INTEGER NOT NULL,
@@ -139,14 +147,24 @@ export function openDatabase(path: string): DatabaseSync {
       db.exec(`ALTER TABLE transactions ADD COLUMN ${addedColumn} TEXT;`);
     }
   }
+  const agentColumns = (
+    db.prepare("PRAGMA table_info(agents)").all() as { name: string }[]
+  ).map((column) => column.name);
+  if (!agentColumns.includes("sla_seconds")) {
+    db.exec(`ALTER TABLE agents ADD COLUMN sla_seconds REAL;`);
+  }
+  if (!agentColumns.includes("manifest_signature")) {
+    db.exec(`ALTER TABLE agents ADD COLUMN manifest_signature TEXT;`);
+  }
   return db;
 }
 
 export function insertAgent(db: DatabaseSync, row: AgentRow): void {
   db.prepare(
     `INSERT INTO agents (agent_id, manifest_url, wallet_address, stake_amount, capability_tags,
-       price_schedule, principal_contact, principal_verified, manifest_fetched_at, created_at, last_active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       price_schedule, sla_seconds, manifest_signature, principal_contact, principal_verified,
+       manifest_fetched_at, created_at, last_active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.agent_id,
     row.manifest_url,
@@ -154,6 +172,8 @@ export function insertAgent(db: DatabaseSync, row: AgentRow): void {
     row.stake_amount,
     row.capability_tags,
     row.price_schedule,
+    row.sla_seconds,
+    row.manifest_signature,
     row.principal_contact,
     row.principal_verified,
     row.manifest_fetched_at,
@@ -171,11 +191,14 @@ export function updateAgentManifestCache(
   agentId: string,
   capabilityTags: string,
   priceSchedule: string,
+  slaSeconds: number,
+  manifestSignature: string,
   fetchedAt: number
 ): void {
   db.prepare(
-    `UPDATE agents SET capability_tags = ?, price_schedule = ?, manifest_fetched_at = ? WHERE agent_id = ?`
-  ).run(capabilityTags, priceSchedule, fetchedAt, agentId);
+    `UPDATE agents SET capability_tags = ?, price_schedule = ?, sla_seconds = ?,
+       manifest_signature = ?, manifest_fetched_at = ? WHERE agent_id = ?`
+  ).run(capabilityTags, priceSchedule, slaSeconds, manifestSignature, fetchedAt, agentId);
 }
 
 export function touchLastActive(db: DatabaseSync, agentId: string, at: number): void {

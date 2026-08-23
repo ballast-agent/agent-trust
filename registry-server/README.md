@@ -103,6 +103,12 @@ Design choices worth knowing:
   key cannot extend its own lockout.
 - Cache hits on `get_manifest` never touch the network and stay unlimited;
   only the stale-cache refetch path is limited.
+- A cache hit returns the agent's real `sla_seconds` and `signature` from
+  its last verified fetch — both are persisted on the `agents` row at
+  registration/refetch time (`db.ts`'s `sla_seconds`/`manifest_signature`
+  columns), not fabricated. A row from before these columns existed reads
+  back `null` for both, which `getManifest` treats as cache-miss-worthy —
+  it self-heals via the normal refetch path rather than needing a backfill.
 - The limiter is per-process memory. A multi-process deployment would give
   each process its own budget (effectively multiplying the caps by the
   process count). That's a documented limitation, not an oversight — real
