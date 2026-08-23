@@ -2,11 +2,14 @@
 
 Serverless deployment tooling per
 [project-docs/serverless-deployment-guide.md](../project-docs/serverless-deployment-guide.md)
-— issue [#8](https://github.com/loomweaver-agent/agent-trust/issues/8) of
-that design's 4-issue tracking list (Litestream replication). Issues
-[#9](https://github.com/loomweaver-agent/agent-trust/issues/9)–[#11](https://github.com/loomweaver-agent/agent-trust/issues/11)
-(the distributed lock, the scale-to-zero compute wrapper, and the HTTP/SSE
-MCP transport) are not built here yet.
+— issues [#8](https://github.com/loomweaver-agent/agent-trust/issues/8)
+(Litestream replication) and
+[#9](https://github.com/loomweaver-agent/agent-trust/issues/9) (the
+single-writer distributed lock) of that design's 4-issue tracking list are
+built here. Issues [#10](https://github.com/loomweaver-agent/agent-trust/issues/10)–[#11](https://github.com/loomweaver-agent/agent-trust/issues/11)
+(the scale-to-zero compute wrapper and the HTTP/SSE MCP transport) are not
+built here yet — the lock exists but nothing calls it as part of a real
+request lifecycle until #10 wires it in.
 
 ## What's actually proven here vs. what still needs real R2 credentials
 
@@ -77,7 +80,7 @@ Expected output ends with "Litestream replication mechanism verified end-to-end"
    litestream replicate -config deploy/litestream/litestream.yml
    ```
 
-5. To restore (e.g. bootstrapping a fresh instance, per issue #9/#10's
+5. To restore (e.g. bootstrapping a fresh instance, per issue #10's
    scale-to-zero design):
 
    ```bash
@@ -99,6 +102,48 @@ issue #10's design) run Linux, so this specific quirk is a local
 Windows-dev-loop wrinkle, not a production concern — but don't `set -e` /
 fail a script purely on this command's exit code on Windows without also
 checking the data.
+
+## The distributed lock (issue #9)
+
+Litestream (above) replicates one writer's changes — it does not arbitrate
+multiple simultaneous writers. `src/distributed-lock.ts` is that
+arbitration: a mutex over a `ConditionalStore` (`src/conditional-store.ts`),
+implemented against the exact conditional-write semantics Cloudflare R2's
+S3-compatible API actually supports (verified against
+[developers.cloudflare.com/r2/api/s3/api/](https://developers.cloudflare.com/r2/api/s3/api/),
+2026-08-23): `PutObject` supports `If-Match`/`If-None-Match`; `DeleteObject`
+supports **neither**. That's why `releaseLock` overwrites the lock record
+with a `released` marker via a conditional `PutObject` rather than deleting
+it — R2 gives no conditional-delete primitive to build one on.
+
+Run its tests:
+
+```bash
+npm test
+```
+
+8 tests, including a genuine multi-process race (`test/distributed-lock.test.ts`'s
+last test spawns 6 independent OS processes — via `node:child_process.fork`,
+mirroring `escrow-server/test/concurrent-confirm-release-child.ts`'s exact
+pattern — that really race the same lock key through real file I/O, not
+`Promise.all` timing luck on one process). That test runs against
+`LocalFileConditionalStore`, a test-only backend built purely to get real
+OS-level atomicity without needing R2 credentials — production uses
+`R2ConditionalStore` instead (`src/r2-conditional-store.ts`), which talks
+to the real R2 API via `@aws-sdk/client-s3`. Both implement the identical
+`ConditionalStore` interface that `distributed-lock.ts`'s actual algorithm
+is written against, so what the tests prove about the algorithm transfers
+directly — but, same honesty boundary as the Litestream section above:
+**`R2ConditionalStore` has never been run against a real R2 bucket** (no
+Cloudflare credentials in this environment). Before trusting it in
+production, run it through the same scenarios
+`test/distributed-lock.test.ts` proves against `LocalFileConditionalStore` —
+concurrent acquire, TTL-expiry reclaim, crash-then-reclaim — pointed at a
+real bucket instead.
+
+Not built yet: nothing actually calls `acquireLock`/`releaseLock` as part
+of a real request lifecycle — that wiring is issue #10's scale-to-zero
+compute wrapper, which is the first place this lock has a caller.
 
 ## Why WAL mode matters here
 

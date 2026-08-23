@@ -137,7 +137,7 @@ signing an actual ruling.
 | Toy buyer/seller agents (end-to-end demo) | ✅ Built — [`demo/`](demo), drives both live MCP servers, not internal function calls |
 | Pre-selected arbitration (opt-in single arbiter; spec-compliant `registry_quorum` verifiably-random quorum of 3 with majority vote) | ✅ Built — `escrow-server`'s `create_escrow` + `resolve_dispute` |
 | Auto-release review gap (payer unreachable at sweep time) | ✅ Built — optional payer `pre_signed_review` at creation, redeemed only by the auto-release path |
-| Serverless / zero-idle-cost deployment (Litestream + scale-to-zero compute) | 🟡 Partial — Litestream replication built ([`deploy/`](deploy)); the lock, compute wrapper, and HTTP transport are still design only |
+| Serverless / zero-idle-cost deployment (Litestream + scale-to-zero compute) | 🟡 Partial — Litestream replication + the distributed lock built ([`deploy/`](deploy)); the compute wrapper and HTTP transport are still design only |
 | Real x402/on-chain settlement | ❌ Not built — testnet only, after everything above works |
 
 ### Running this without paying for an always-on server
