@@ -68,6 +68,29 @@ test("registerVerifiedAgent rejects a tampered manifest (signature mismatch)", (
   );
 });
 
+test("query_by_capability matches complete tags, not substrings", () => {
+  const db = freshDb();
+  const exactMatch = createTestAgent({
+    capabilityTags: ["parsing"],
+    priceSchedule: { parsing: "1 USDC" },
+  });
+  const substringMatch = createTestAgent({
+    capabilityTags: ["csv-parsing"],
+    priceSchedule: { "csv-parsing": "1 USDC" },
+  });
+
+  for (const agent of [exactMatch, substringMatch]) {
+    tools.registerVerifiedAgent(db, agent.manifest, {
+      manifest_url: "https://example.test/manifest.json",
+      wallet_address: agent.manifest.wallet_address,
+      stake_amount: requiredStake(agent.manifest.price_schedule),
+    });
+  }
+
+  const results = tools.queryByCapability(db, { capability_tag: "parsing" });
+  assert.deepEqual(results.map((result) => result.agent_id), [exactMatch.agentId]);
+});
+
 test("submit_review only accepts reviews from the actual payer/payee, correctly signed", () => {
   const db = freshDb();
   const buyer = createTestAgent();

@@ -157,9 +157,11 @@ export function touchLastActive(db: DatabaseSync, agentId: string, at: number): 
 }
 
 export function listAgentsByCapability(db: DatabaseSync, capabilityTag: string): AgentRow[] {
-  return db
-    .prepare(`SELECT * FROM agents WHERE capability_tags LIKE ?`)
-    .all(`%"${capabilityTag}"%`) as unknown as AgentRow[];
+  const agents = db.prepare("SELECT * FROM agents").all() as unknown as AgentRow[];
+  return agents.filter((agent) => {
+    const tags = JSON.parse(agent.capability_tags) as string[];
+    return tags.includes(capabilityTag);
+  });
 }
 
 export function reduceStake(db: DatabaseSync, agentId: string, amount: number): void {
