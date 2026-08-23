@@ -1,0 +1,18 @@
+{
+  "name": "@agenttrust/deploy",
+  "version": "0.1.0",
+  "description": "Serverless deployment tooling (Litestream replication, and later the scale-to-zero wrapper) — project-docs/serverless-deployment-guide.md",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "smoke-test:litestream": "tsx src/litestream-smoke-test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

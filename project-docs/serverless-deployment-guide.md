@@ -1,7 +1,9 @@
 # Serverless Deployment: Litestream + Scale-to-Zero Compute
 
-**Status: design only, nothing here is built.** See the tracking issues
-linked at the bottom for the actual implementation work.
+**Status:** part 1/4 (Litestream replication) is built — see
+[`deploy/`](../deploy). Parts 2–4 (the distributed lock, the scale-to-zero
+compute wrapper, and the HTTP/SSE MCP transport) are still design only.
+See the tracking issues linked at the bottom.
 
 ## The problem this solves
 
@@ -68,13 +70,34 @@ likely to be underestimated, so it gets its own section below.
 
 ## The parts that need to exist (none of them do yet)
 
-### 1. Litestream replication of the shared DB to R2
+### 1. Litestream replication of the shared DB to R2 — ✅ built
 
-Mechanical setup: a `litestream.yml` pointing at the SQLite file used by
-`registry-server`/`escrow-server`, replicating continuously to an R2
-bucket. R2 specifically (not S3) for its free egress — every restore pulls
-the whole state back down, and that should never cost anything at
-prototype scale.
+[`deploy/litestream/litestream.yml`](../deploy/litestream/litestream.yml)
+points at the SQLite file used by `registry-server`/`escrow-server`,
+replicating continuously to an R2 bucket (R2 specifically, not raw S3, for
+its free egress — every restore pulls the whole state back down, and that
+should never cost anything at prototype scale). See
+[`deploy/README.md`](../deploy/README.md) for bucket setup.
+
+A genuine prerequisite this surfaced: Litestream replicates by streaming
+the SQLite WAL file, which requires the database to actually be in WAL
+mode — `registry-server/src/db.ts`'s `openDatabase` didn't set this before
+(default rollback-journal mode gives Litestream nothing to follow). Fixed
+by adding `PRAGMA journal_mode = WAL;` unconditionally (safe no-op for
+`:memory:` tests) — which also happens to be SQLite's own recommended mode
+for this project's actual access pattern, and measurably reduced lock
+contention in `escrow-server`'s genuine-concurrency tests once enabled.
+
+The replication *mechanism* is proven end to end by
+[`deploy/src/litestream-smoke-test.ts`](../deploy/src/litestream-smoke-test.ts)
+(`npm run smoke-test:litestream` in `deploy/`) using Litestream's local
+`file` replica type — no R2/Cloudflare credentials needed, since Litestream's
+replica backends are interchangeable by design. What's **not** verified is
+the actual R2 config against a real bucket, since this environment has no
+Cloudflare credentials — that still needs a real run before calling this
+production-ready. `deploy/README.md` documents this distinction precisely,
+plus a real Windows-only quirk found while building this (a non-fatal
+directory-fsync error on `litestream restore`).
 
 ### 2. A single-writer lock — the part that actually matters
 

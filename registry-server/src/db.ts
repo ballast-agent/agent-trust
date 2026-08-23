@@ -134,6 +134,13 @@ CREATE INDEX IF NOT EXISTS idx_reviews_tx ON reviews(tx_id);
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys = ON;");
+  // WAL mode is a hard requirement for Litestream replication (it streams
+  // the WAL file; a rollback-journal db gives it nothing to follow — see
+  // project-docs/serverless-deployment-guide.md) and is also SQLite's own
+  // recommendation for this project's actual access pattern: two processes
+  // sharing one file. Silently stays "memory" for :memory: connections
+  // (SQLite doesn't support WAL there) — safe no-op for every in-memory test.
+  db.exec("PRAGMA journal_mode = WAL;");
   db.exec(SCHEMA);
   // Additive migrations for database files created before a column existed.
   // CREATE TABLE IF NOT EXISTS can't add columns to an existing table, and
