@@ -43,10 +43,11 @@ export interface TransactionRow {
   status: TransactionStatus;
   escrow_deadline: number | null;
   // Pre-selected at escrow creation per agent-trust-layer-spec.md §4 — "not
-  // after-the-fact, so neither side can shop for a friendly arbiter." Null
-  // for transactions created before escrow-server existed / that never
-  // specified one (Registry-only test transactions).
-  arbiter_id: string | null;
+  // after-the-fact, so neither side can shop for a friendly arbiter." JSON
+  // array of agent_ids: length 1 for a single arbiter, length 3 for the
+  // spec's "randomly-selected quorum of 3." "[]" for transactions created
+  // before escrow-server existed (Registry-only test transactions).
+  arbiter_ids: string;
   created_at: number;
   // Set when submitDeliverable moves status to 'verified' — the clock the
   // Escrow Layer's auto-release grace window (spec §3 step 5) counts from.
@@ -88,7 +89,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   deliverable_hash TEXT,
   status TEXT NOT NULL CHECK (status IN ('pending','escrowed','verified','released','disputed','refunded','slashed')),
   escrow_deadline INTEGER,
-  arbiter_id TEXT,
+  arbiter_ids TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL,
   delivered_at INTEGER,
   resolved_at INTEGER
@@ -176,7 +177,7 @@ export function getTransaction(db: DatabaseSync, txId: string): TransactionRow |
 export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
   db.prepare(
     `INSERT INTO transactions (tx_id, payer_id, payee_id, amount, currency, task_hash,
-       deliverable_hash, status, escrow_deadline, arbiter_id, created_at, delivered_at, resolved_at)
+       deliverable_hash, status, escrow_deadline, arbiter_ids, created_at, delivered_at, resolved_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.tx_id,
@@ -188,7 +189,7 @@ export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
     row.deliverable_hash,
     row.status,
     row.escrow_deadline,
-    row.arbiter_id,
+    row.arbiter_ids,
     row.created_at,
     row.delivered_at,
     row.resolved_at

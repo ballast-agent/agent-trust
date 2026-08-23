@@ -28,10 +28,12 @@ function setUpParties() {
 }
 
 // Must mirror exactly the payload shape createEscrow verifies the signature
-// against (it deliberately excludes min_payee_reputation/signature).
+// against (it deliberately excludes min_payee_reputation/signature, and
+// includes only whichever of arbiter_id/arbiter_ids was actually provided).
 function signCreate(payer: TestAgent, fields: Omit<escrow.CreateEscrowInput, "signature">) {
-  const { payer_id, payee_id, amount, currency, task_hash, sla_seconds, arbiter_id } = fields;
-  return payer.sign({ payer_id, payee_id, amount, currency, task_hash, sla_seconds, arbiter_id });
+  const { payer_id, payee_id, amount, currency, task_hash, sla_seconds, arbiter_id, arbiter_ids } = fields;
+  const base = { payer_id, payee_id, amount, currency, task_hash, sla_seconds };
+  return payer.sign(arbiter_id !== undefined ? { ...base, arbiter_id } : { ...base, arbiter_ids });
 }
 
 test("createEscrow locks funds with a pre-selected arbiter", () => {
@@ -49,6 +51,66 @@ test("createEscrow locks funds with a pre-selected arbiter", () => {
 
   const { tx_id } = escrow.createEscrow(db, { ...fields, signature });
   assert.ok(tx_id);
+});
+
+test("createEscrow accepts a quorum of exactly 3 pre-selected arbiters", () => {
+  const { db, buyer, seller } = setUpParties();
+  const arbiterA = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  const arbiterB = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  const arbiterC = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  for (const a of [arbiterA, arbiterB, arbiterC]) register(db, a);
+
+  const fields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_ids: [arbiterA.agentId, arbiterB.agentId, arbiterC.agentId],
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...fields, signature: signCreate(buyer, fields) });
+  assert.ok(tx_id);
+});
+
+test("createEscrow rejects a quorum that isn't exactly 3 unique arbiters", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+
+  const tooFew = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_ids: [arbiter.agentId, arbiter.agentId], // also not unique
+  };
+  assert.throws(
+    () => escrow.createEscrow(db, { ...tooFew, signature: signCreate(buyer, tooFew) }),
+    /exactly 3 unique agent ids/
+  );
+});
+
+test("createEscrow rejects specifying both arbiter_id and arbiter_ids, or neither", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const base = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+  };
+
+  assert.throws(
+    () => escrow.createEscrow(db, { ...base, signature: buyer.sign(base) }),
+    /requires exactly one of arbiter_id or arbiter_ids/
+  );
+  const both = { ...base, arbiter_id: arbiter.agentId, arbiter_ids: [arbiter.agentId, arbiter.agentId, arbiter.agentId] };
+  assert.throws(
+    () => escrow.createEscrow(db, { ...both, signature: buyer.sign(both) }),
+    /requires exactly one of arbiter_id or arbiter_ids/
+  );
 });
 
 test("createEscrow rejects a forged payer signature", () => {
@@ -140,14 +202,13 @@ test("raiseDispute then resolveDispute(slash) delegates to the Registry's slash_
     tx_id,
     outcome: "slash",
     reason: "confirmed non-delivery",
-    arbiter_id: arbiter.agentId,
-    authorization: arbiter.sign(resolvePayload),
+    authorizations: [{ arbiter_id: arbiter.agentId, authorization: arbiter.sign(resolvePayload) }],
   });
   const after = registry.queryReputation(db, seller.agentId).stake_amount;
   assert.ok(after < before);
 });
 
-test("resolveDispute rejects an arbiter that wasn't pre-selected at creation", () => {
+test("resolveDispute ignores an authorization from an arbiter that wasn't pre-selected at creation", () => {
   const { db, buyer, seller, arbiter } = setUpParties();
   const impostor = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
   register(db, impostor);
@@ -166,17 +227,70 @@ test("resolveDispute rejects an arbiter that wasn't pre-selected at creation", (
   escrow.raiseDispute(db, { ...disputeFields, signature: buyer.sign(disputeFields) });
 
   const resolvePayload = { tx_id, outcome: "refund" as const, reason: "not the real arbiter" };
+  // The impostor's authorization is well-formed and correctly signed, but
+  // since they were never pre-selected for this tx it's silently ignored,
+  // leaving 0 valid votes — not treated as fraud, just insufficient.
   assert.throws(
     () =>
       escrow.resolveDispute(db, {
         tx_id,
         outcome: "refund",
         reason: "not the real arbiter",
-        arbiter_id: impostor.agentId,
-        authorization: impostor.sign(resolvePayload),
+        authorizations: [{ arbiter_id: impostor.agentId, authorization: impostor.sign(resolvePayload) }],
       }),
-    /not the arbiter pre-selected/
+    /requires 1 valid signature/
   );
+});
+
+test("resolveDispute with a quorum of 3 requires a majority (2 of 3) agreeing, not just one", () => {
+  const { db, buyer, seller } = setUpParties();
+  const arbiterA = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  const arbiterB = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  const arbiterC = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  for (const a of [arbiterA, arbiterB, arbiterC]) register(db, a);
+
+  const createFields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_ids: [arbiterA.agentId, arbiterB.agentId, arbiterC.agentId],
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+  const disputeFields = { tx_id, disputer_id: buyer.agentId, reason: "bad result" };
+  escrow.raiseDispute(db, { ...disputeFields, signature: buyer.sign(disputeFields) });
+
+  const resolvePayload = { tx_id, outcome: "refund" as const, reason: "quorum test" };
+
+  // Quorum-split: only 1 of 3 signs — not enough.
+  assert.throws(
+    () =>
+      escrow.resolveDispute(db, {
+        tx_id,
+        outcome: "refund",
+        reason: "quorum test",
+        authorizations: [{ arbiter_id: arbiterA.agentId, authorization: arbiterA.sign(resolvePayload) }],
+      }),
+    /requires 2 valid signature/
+  );
+
+  // Quorum-achieved: 2 of 3 agree on the same outcome — sufficient, even
+  // with a third, non-pre-selected signature thrown in (ignored, not counted).
+  const outsider = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  register(db, outsider);
+  const result = escrow.resolveDispute(db, {
+    tx_id,
+    outcome: "refund",
+    reason: "quorum test",
+    authorizations: [
+      { arbiter_id: arbiterA.agentId, authorization: arbiterA.sign(resolvePayload) },
+      { arbiter_id: arbiterB.agentId, authorization: arbiterB.sign(resolvePayload) },
+      { arbiter_id: outsider.agentId, authorization: outsider.sign(resolvePayload) },
+    ],
+  });
+  assert.equal(result.status, "refunded");
 });
 
 test("reclaimExpired refunds the payer once the SLA deadline has passed, not before", () => {

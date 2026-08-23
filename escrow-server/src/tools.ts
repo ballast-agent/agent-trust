@@ -46,36 +46,69 @@ export interface CreateEscrowInput {
   currency: string;
   task_hash: string;
   sla_seconds: number;
-  arbiter_id: string;
+  /** Single pre-selected arbiter. Exactly one of arbiter_id / arbiter_ids
+   * must be given — not both, not neither. */
+  arbiter_id?: string;
+  /** A quorum of exactly 3 pre-selected arbiters per
+   * agent-trust-layer-spec.md §4 ("a randomly-selected quorum of 3").
+   * resolve_dispute then requires majority (2 of 3) agreement. */
+  arbiter_ids?: string[];
   /** Payer's configured trust floor — spec §3 step 3: refuse the escrow
    * outright if the payee's reputation is below what the payer requires,
    * rather than accepting funds into an escrow the payer wouldn't approve of. */
   min_payee_reputation?: number;
-  /** Payer's signature over {payer_id, payee_id, amount, currency, task_hash,
-   * sla_seconds, arbiter_id} — proves the payer actually authorized locking
-   * these funds, not just that some caller invoked this tool. */
+  /** Payer's signature over the payload actually chosen below — either
+   * {..., arbiter_id} or {..., arbiter_ids}, matching whichever field was
+   * provided, so old single-arbiter callers keep signing exactly what they
+   * always signed. Proves the payer actually authorized locking these
+   * funds under this specific arbiter set, not just that some caller
+   * invoked this tool. */
   signature: string;
+}
+
+/** Resolves and validates the pre-selected arbiter set, without yet checking
+ * each member is a real registered arbitration-tagged agent (see createEscrow). */
+function resolveArbiterSet(input: CreateEscrowInput): string[] {
+  const hasSingle = input.arbiter_id !== undefined;
+  const hasQuorum = input.arbiter_ids !== undefined;
+  if (hasSingle === hasQuorum) {
+    throw new EscrowError("createEscrow requires exactly one of arbiter_id or arbiter_ids");
+  }
+  if (hasSingle) return [input.arbiter_id as string];
+  const ids = input.arbiter_ids as string[];
+  if (ids.length !== 3 || new Set(ids).size !== 3) {
+    throw new EscrowError(
+      "arbiter_ids must contain exactly 3 unique agent ids (agent-trust-layer-spec.md §4: quorum of 3)"
+    );
+  }
+  return ids;
 }
 
 export function createEscrow(database: DatabaseSync, input: CreateEscrowInput) {
   requireAgent(database, input.payer_id, "payer_id");
   requireAgent(database, input.payee_id, "payee_id");
 
-  const arbiter = requireAgent(database, input.arbiter_id, "arbiter_id");
-  const arbiterTags = JSON.parse(arbiter.capability_tags) as string[];
-  if (!arbiterTags.includes(ARBITRATION_TAG)) {
-    throw new EscrowError(`arbiter_id ${input.arbiter_id} does not have the '${ARBITRATION_TAG}' capability tag`);
+  const arbiterIds = resolveArbiterSet(input);
+  for (const arbiterId of arbiterIds) {
+    const arbiter = requireAgent(database, arbiterId, "arbiter_id");
+    const arbiterTags = JSON.parse(arbiter.capability_tags) as string[];
+    if (!arbiterTags.includes(ARBITRATION_TAG)) {
+      throw new EscrowError(`arbiter_id ${arbiterId} does not have the '${ARBITRATION_TAG}' capability tag`);
+    }
   }
 
-  const payload = {
+  const basePayload = {
     payer_id: input.payer_id,
     payee_id: input.payee_id,
     amount: input.amount,
     currency: input.currency,
     task_hash: input.task_hash,
     sla_seconds: input.sla_seconds,
-    arbiter_id: input.arbiter_id,
   };
+  const payload =
+    input.arbiter_id !== undefined
+      ? { ...basePayload, arbiter_id: input.arbiter_id }
+      : { ...basePayload, arbiter_ids: input.arbiter_ids };
   verifyPartySignature(payload, input.payer_id, input.signature, "createEscrow");
 
   if (input.min_payee_reputation !== undefined) {
@@ -101,7 +134,7 @@ export function createEscrow(database: DatabaseSync, input: CreateEscrowInput) {
     deliverable_hash: null,
     status: "escrowed",
     escrow_deadline: now + input.sla_seconds * 1000,
-    arbiter_id: input.arbiter_id,
+    arbiter_ids: JSON.stringify(arbiterIds),
     created_at: now,
     delivered_at: null,
     resolved_at: null,
@@ -215,12 +248,49 @@ export function raiseDispute(database: DatabaseSync, input: RaiseDisputeInput) {
 
 // --- resolveDispute -------------------------------------------------------
 
+export interface ArbiterAuthorization {
+  arbiter_id: string;
+  authorization: string;
+}
+
 export interface ResolveDisputeInput {
   tx_id: string;
   outcome: "release" | "refund" | "slash";
   reason: string;
-  arbiter_id: string;
-  authorization: string;
+  /**
+   * One authorization per voting arbiter. A single-arbiter escrow needs
+   * exactly 1; a quorum-of-3 escrow needs a majority (2 of 3) agreeing on
+   * the same outcome — agent-trust-layer-spec.md §4. Signatures from
+   * anyone not in the transaction's pre-selected arbiter set are ignored,
+   * not counted as fraud — a caller may harmlessly submit extras.
+   */
+  authorizations: ArbiterAuthorization[];
+}
+
+function requiredVoteCount(arbiterSetSize: number): number {
+  return Math.floor(arbiterSetSize / 2) + 1;
+}
+
+/** Verifies each candidate's signature over `payload` and returns the ids of
+ * those that are both pre-selected for this tx and produced a valid signature. */
+function collectValidVotes(
+  preSelected: string[],
+  authorizations: ArbiterAuthorization[],
+  payload: unknown
+): string[] {
+  const message = Buffer.from(canonicalize(payload), "utf8");
+  const valid = new Set<string>();
+  for (const { arbiter_id, authorization } of authorizations) {
+    if (!preSelected.includes(arbiter_id)) continue; // not pre-selected for this tx — ignored, not an error
+    let ok: boolean;
+    try {
+      ok = verifySignature(arbiter_id, message, authorization);
+    } catch {
+      ok = false;
+    }
+    if (ok) valid.add(arbiter_id);
+  }
+  return [...valid];
 }
 
 export function resolveDispute(database: DatabaseSync, input: ResolveDisputeInput) {
@@ -229,27 +299,45 @@ export function resolveDispute(database: DatabaseSync, input: ResolveDisputeInpu
   if (tx.status !== "disputed") {
     throw new EscrowError(`tx_id ${input.tx_id} is not disputed (status=${tx.status})`);
   }
-  if (tx.arbiter_id !== input.arbiter_id) {
-    throw new EscrowError(
-      `arbiter_id ${input.arbiter_id} was not the arbiter pre-selected at escrow creation ` +
-        `(agent-trust-layer-spec.md §4: neither side may shop for a friendlier arbiter after the fact)`
-    );
-  }
+
+  const preSelected = JSON.parse(tx.arbiter_ids) as string[];
+  const required = requiredVoteCount(preSelected.length);
 
   if (input.outcome === "slash") {
-    // Reuse the Registry's existing slash_stake tool rather than
-    // duplicating its arbiter/authorization verification here.
+    // Count votes over slash_stake's own payload shape, since that's what
+    // will actually be forwarded and re-verified there — reuse its
+    // arbiter/authorization verification rather than duplicating it.
+    const slashPayload = { agent_id: tx.payee_id, tx_id: input.tx_id, reason: input.reason };
+    const validVoters = collectValidVotes(preSelected, input.authorizations, slashPayload);
+    if (validVoters.length < required) {
+      throw new EscrowError(
+        `resolveDispute(slash) requires ${required} valid signature(s) from the pre-selected ` +
+          `arbiter(s) (agent-trust-layer-spec.md §4); got ${validVoters.length}`
+      );
+    }
+    // Quorum reached — delegate to the Registry using any one agreeing,
+    // pre-selected, verified arbiter. slash_stake only needs one legitimate
+    // arbitration-tagged authorizer; the quorum check already happened here.
+    const [authorizingArbiter] = validVoters;
+    const authorization = input.authorizations.find((a) => a.arbiter_id === authorizingArbiter)!.authorization;
     return registry.slashStake(database, {
       agent_id: tx.payee_id,
       tx_id: input.tx_id,
       reason: input.reason,
-      arbiter_id: input.arbiter_id,
-      authorization: input.authorization,
+      arbiter_id: authorizingArbiter,
+      authorization,
     });
   }
 
   const payload = { tx_id: input.tx_id, outcome: input.outcome, reason: input.reason };
-  verifyPartySignature(payload, input.arbiter_id, input.authorization, "resolveDispute");
+  const validVoters = collectValidVotes(preSelected, input.authorizations, payload);
+  if (validVoters.length < required) {
+    throw new EscrowError(
+      `resolveDispute(${input.outcome}) requires ${required} valid signature(s) from the ` +
+        `pre-selected arbiter(s) agreeing on '${input.outcome}' (agent-trust-layer-spec.md §4); ` +
+        `got ${validVoters.length}`
+    );
+  }
 
   const newStatus: db.TransactionStatus = input.outcome === "release" ? "released" : "refunded";
   db.setTransactionStatus(database, input.tx_id, newStatus, Date.now());

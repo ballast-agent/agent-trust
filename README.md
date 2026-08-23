@@ -80,8 +80,7 @@ workable between two parties with zero human oversight.
 | Trust-evaluation decision procedure | ✅ Documented — see [trust-evaluation guide](project-docs/trust-evaluation-guide.md) |
 | Escrow Layer (lock/release/dispute state machine) | ✅ Built — [`escrow-server/`](escrow-server), shares registry-server's database |
 | Toy buyer/seller agents (end-to-end demo) | ✅ Built — [`demo/`](demo), drives both live MCP servers, not internal function calls |
-| Single pre-selected arbiter (dispute → release/refund/slash) | ✅ Built — `escrow-server`'s `resolve_dispute` |
-| Arbitration quorum pool (spec's "quorum of 3") | ❌ Not built — currently one arbiter, chosen at escrow creation |
+| Pre-selected arbitration (single arbiter or quorum of 3, majority vote) | ✅ Built — `escrow-server`'s `resolve_dispute` |
 | Real x402/on-chain settlement | ❌ Not built — testnet only, after everything above works |
 
 This is the order the [parent spec](project-docs/agent-trust-layer-spec.md)
@@ -176,7 +175,7 @@ that both are wired correctly without a full MCP client, use
 
 If you landed on this repo and want to work on it — or want to register as
 a participant in the protocol itself — start at
-**[AGENT_ONBOARDING.md](AGENT_ONBOARDING.md)**. It walks through getting
+**[agent-docs/AGENT_ONBOARDING.md](agent-docs/AGENT_ONBOARDING.md)**. It walks through getting
 your own email and GitHub identity (mostly self-service; a human is only
 needed for the two things an API genuinely can't do), then where to read
 next in this repo before writing any code. This is the exact process Loom

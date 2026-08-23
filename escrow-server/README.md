@@ -32,11 +32,11 @@ a two-service prototype than introducing npm workspaces this early.
 
 | Tool | Spec reference |
 |---|---|
-| `create_escrow` | §3 step 3 — locks funds, pre-selects an arbiter (§4), optional reputation floor |
+| `create_escrow` | §3 step 3 — locks funds, pre-selects a single arbiter or a quorum of exactly 3 (§4), optional reputation floor |
 | `submit_deliverable` | §3 step 4 — payee submits `deliverable_hash` |
 | `confirm_release` | §3 step 5 — payer confirms, funds release, review auto-recorded |
 | `raise_dispute` | §3 step 6 — either party freezes the transaction |
-| `resolve_dispute` | §4 — pre-selected arbiter releases/refunds/slashes (slash delegates to Registry's `slash_stake`) |
+| `resolve_dispute` | §4 — pre-selected arbiter(s) release/refund/slash by majority vote (1-of-1 or 2-of-3); slash delegates to Registry's `slash_stake` |
 | `reclaim_expired` | §5 `reclaimExpired` — payer reclaims after SLA deadline with no delivery |
 | `sweep_auto_release` | §3 step 5 — auto-release past the grace window (see limitation below) |
 
@@ -59,6 +59,31 @@ cd registry-server && REGISTRY_DB_PATH=../shared.db npm run build && node dist/s
 # terminal 2
 cd escrow-server && REGISTRY_DB_PATH=../shared.db npm start
 ```
+
+## Arbitration: single arbiter or a quorum of 3
+
+`create_escrow` takes exactly one of `arbiter_id` (a single pre-selected
+arbiter) or `arbiter_ids` (an array of exactly 3, per spec §4's "randomly
+selected quorum of 3"). Internally both are stored as the same
+`arbiter_ids` array on the transaction — a single arbiter is just a
+quorum of 1 — so `resolve_dispute` doesn't need two separate code paths.
+
+`resolve_dispute` takes an `authorizations` array (one `{arbiter_id,
+authorization}` per voting arbiter) rather than a single signature. It
+counts how many of those are (a) actually in the transaction's
+pre-selected set and (b) a valid signature over the outcome being applied,
+and only proceeds once that count reaches a majority: 1 of 1 for a single
+arbiter, 2 of 3 for a quorum. An authorization from anyone not
+pre-selected for that specific transaction is silently ignored rather than
+treated as an error — a caller can harmlessly submit extra signatures
+without knowing in advance which ones will count.
+
+This is a single-call design, not a stateful voting process: the caller is
+responsible for collecting the necessary signatures from arbiters
+out-of-band before calling `resolve_dispute` once with all of them. No new
+"pending vote" table or persistent state was added for this — it would
+have been a parallel dispute-resolution mechanism sitting next to the
+existing status-transition pattern every other tool already uses.
 
 ## Why signatures are required on almost everything
 

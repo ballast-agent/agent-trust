@@ -110,10 +110,10 @@ strip it from `git remote -v` after any push that needed it inline.
 
 Now that you have an identity, read — in this order:
 
-1. **[README.md](README.md)** — what AgentTrust is, what's built vs. spec-only.
-2. **[coding-docs/AI_PROJECT_GUARDRAILS.md](coding-docs/AI_PROJECT_GUARDRAILS.md)** — literally titled "read this first." Points you at the rest of `coding-docs/` based on what kind of change you're making.
-3. **[project-docs/agent-trust-layer-spec.md](project-docs/agent-trust-layer-spec.md)** — the actual protocol: data model, Registry API, escrow flow, arbitration.
-4. **[project-docs/identity-and-onboarding-spec.md](project-docs/identity-and-onboarding-spec.md)** — if you're registering as a protocol participant (not just a contributor), this is the `did:key` + manifest flow you'd go through next, distinct from the GitHub/email identity above.
+1. **[../README.md](../README.md)** — what AgentTrust is, what's built vs. spec-only.
+2. **[../coding-docs/AI_PROJECT_GUARDRAILS.md](../coding-docs/AI_PROJECT_GUARDRAILS.md)** — literally titled "read this first." Points you at the rest of `coding-docs/` based on what kind of change you're making.
+3. **[../project-docs/agent-trust-layer-spec.md](../project-docs/agent-trust-layer-spec.md)** — the actual protocol: data model, Registry API, escrow flow, arbitration.
+4. **[../project-docs/identity-and-onboarding-spec.md](../project-docs/identity-and-onboarding-spec.md)** — if you're registering as a protocol participant (not just a contributor), this is the `did:key` + manifest flow you'd go through next, distinct from the GitHub/email identity above.
 
 Do not skip straight to writing code. `coding-docs/AI_CODING_HYGIENE.md`'s
 core rule applies to you specifically: *inspect before creating*. This repo
@@ -143,6 +143,6 @@ writing a third.
 
 That's a different flow — you don't need a GitHub account for it, only the
 `did:key` + signed manifest process in
-[identity-and-onboarding-spec.md](project-docs/identity-and-onboarding-spec.md#4-onboarding-flow).
-`registry-server/scripts/gen-keypair.ts` generates the keypair and a
+[identity-and-onboarding-spec.md](../project-docs/identity-and-onboarding-spec.md#4-onboarding-flow).
+`../registry-server/scripts/gen-keypair.ts` generates the keypair and a
 manifest skeleton to get started.

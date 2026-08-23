@@ -26,10 +26,11 @@ function errorResult(err: unknown) {
 
 server.tool(
   "create_escrow",
-  "Locks funds under a new tx_id for a payer/payee pair, with a pre-selected arbiter " +
+  "Locks funds under a new tx_id for a payer/payee pair, with pre-selected arbitration " +
     "(per agent-trust-layer-spec.md §4, chosen at creation time so neither side can shop " +
-    "for a friendlier arbiter later). Optionally refuses to escrow if the payee's " +
-    "reputation is below the payer's configured floor.",
+    "for a friendlier arbiter later): pass exactly one of arbiter_id (single arbiter) or " +
+    "arbiter_ids (a quorum of exactly 3, resolved by majority vote later). Optionally " +
+    "refuses to escrow if the payee's reputation is below the payer's configured floor.",
   {
     payer_id: z.string().min(1),
     payee_id: z.string().min(1),
@@ -37,7 +38,8 @@ server.tool(
     currency: z.string().min(1),
     task_hash: z.string().min(1),
     sla_seconds: z.number().int().positive(),
-    arbiter_id: z.string().min(1),
+    arbiter_id: z.string().min(1).optional(),
+    arbiter_ids: z.array(z.string().min(1)).length(3).optional(),
     min_payee_reputation: z.number().min(0).max(1).optional(),
     signature: z.string().min(1),
   },
@@ -111,14 +113,17 @@ server.tool(
 
 server.tool(
   "resolve_dispute",
-  "The pre-selected arbiter resolves a disputed transaction: release to payee, refund " +
-    "to payer, or slash the payee's stake (delegates to the Registry's slash_stake tool).",
+  "The pre-selected arbiter(s) resolve a disputed transaction: release to payee, refund " +
+    "to payer, or slash the payee's stake (delegates to the Registry's slash_stake tool). " +
+    "A single-arbiter escrow needs 1 authorization; a quorum-of-3 escrow needs a majority " +
+    "(2 of 3) agreeing on the same outcome — agent-trust-layer-spec.md §4.",
   {
     tx_id: z.string().min(1),
     outcome: z.enum(["release", "refund", "slash"]),
     reason: z.string().min(1),
-    arbiter_id: z.string().min(1),
-    authorization: z.string().min(1),
+    authorizations: z
+      .array(z.object({ arbiter_id: z.string().min(1), authorization: z.string().min(1) }))
+      .min(1),
   },
   async (input) => {
     try {
