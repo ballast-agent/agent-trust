@@ -1,5 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { fork, type ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { openDatabase, setTransactionStatus, setDeliverableHash, getTransaction } from "../../registry-server/src/db.js";
 import * as registry from "../../registry-server/src/tools.js";
 import { requiredStake } from "../../registry-server/src/scoring.js";
@@ -27,6 +32,14 @@ function setUpParties() {
   return { db, buyer, seller, arbiter };
 }
 
+function setUpPartiesInDb(db: ReturnType<typeof freshDb>) {
+  const buyer = createTestAgent();
+  const seller = createTestAgent();
+  const arbiter = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  for (const a of [buyer, seller, arbiter]) register(db, a);
+  return { buyer, seller, arbiter };
+}
+
 // Must mirror exactly the payload shape createEscrow verifies the signature
 // against (it deliberately excludes min_payee_reputation/signature, and
 // includes only whichever of arbiter_id/arbiter_ids was actually provided).
@@ -34,6 +47,105 @@ function signCreate(payer: TestAgent, fields: Omit<escrow.CreateEscrowInput, "si
   const { payer_id, payee_id, amount, currency, task_hash, sla_seconds, arbiter_id, arbiter_ids } = fields;
   const base = { payer_id, payee_id, amount, currency, task_hash, sla_seconds };
   return payer.sign(arbiter_id !== undefined ? { ...base, arbiter_id } : { ...base, arbiter_ids });
+}
+
+type ContenderResult =
+  | { ok: true; result: unknown }
+  | { ok: false; name: string; message: string };
+
+interface ChildMessage {
+  type: "ready" | "result";
+  status?: string | null;
+  ok?: boolean;
+  result?: unknown;
+  name?: string;
+  message?: string;
+}
+
+const concurrentConfirmReleaseChildPath = fileURLToPath(
+  new URL("./concurrent-confirm-release-child.ts", import.meta.url)
+);
+
+async function runConcurrentConfirmReleaseAttempts(
+  dbPath: string,
+  input: escrow.ConfirmReleaseInput,
+  contenderCount: number
+): Promise<ContenderResult[]> {
+  const children: ChildProcess[] = [];
+  const readyStatuses: (string | null)[] = [];
+
+  const readiness = Array.from({ length: contenderCount }, () => Promise.withResolvers<void>());
+  const results = Array.from({ length: contenderCount }, () => Promise.withResolvers<ContenderResult>());
+
+  for (let index = 0; index < contenderCount; index += 1) {
+    const child = fork(concurrentConfirmReleaseChildPath, {
+      cwd: new URL("..", import.meta.url),
+      execArgv: ["--import", "tsx"],
+      env: {
+        ...process.env,
+        AGENTTRUST_CONCURRENCY_CHILD_CONFIG: JSON.stringify({ dbPath, input }),
+      },
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    children.push(child);
+
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("message", (message: ChildMessage) => {
+      if (message.type === "ready") {
+        readyStatuses[index] = message.status ?? null;
+        readiness[index].resolve();
+        return;
+      }
+
+      if (message.type === "result") {
+        if (message.ok === true) {
+          results[index].resolve({ ok: true, result: message.result });
+        } else {
+          results[index].resolve({
+            ok: false,
+            name: message.name ?? "Error",
+            message: message.message ?? "unknown error",
+          });
+        }
+      }
+    });
+
+    child.on("error", (err) => {
+      readiness[index].reject(err);
+      results[index].reject(err);
+    });
+
+    child.on("exit", (code, signal) => {
+      if (code === 0) return;
+      const err = new Error(
+        `concurrency child exited with code=${code} signal=${signal ?? "none"} stderr=${stderr.trim()}`
+      );
+      readiness[index].reject(err);
+      results[index].reject(err);
+    });
+  }
+
+  await Promise.all(readiness.map((ready) => ready.promise));
+  assert.deepEqual(
+    readyStatuses,
+    Array.from({ length: contenderCount }, () => "verified"),
+    "every independent contender must observe the same eligible source state before release"
+  );
+
+  for (const child of children) {
+    child.send({ type: "go" });
+  }
+
+  return Promise.all(results.map((result) => result.promise));
+}
+
+function countReviewsForTx(db: ReturnType<typeof freshDb>, txId: string): number {
+  const row = db.prepare("SELECT COUNT(*) AS count FROM reviews WHERE tx_id = ?").get(txId) as { count: number };
+  return row.count;
 }
 
 test("createEscrow locks funds with a pre-selected arbiter", () => {
@@ -279,6 +391,72 @@ test("confirm_release called twice for the same tx_id: second call is rejected, 
   // Exactly one review was recorded, not two.
   const reputation = registry.queryReputation(db, seller.agentId);
   assert.equal(reputation.tx_count, 1);
+});
+
+test("concurrent confirm_release attempts from independent processes settle exactly once", async () => {
+  const contenderCount = 6;
+
+  for (let iteration = 0; iteration < 5; iteration += 1) {
+    const tempDir = mkdtempSync(join(tmpdir(), "agenttrust-escrow-concurrency-"));
+    const dbPath = join(tempDir, "trust.sqlite");
+    const db = openDatabase(dbPath);
+    db.exec("PRAGMA busy_timeout = 2000;");
+
+    try {
+      const { buyer, seller, arbiter } = setUpPartiesInDb(db);
+      const createFields = {
+        payer_id: buyer.agentId,
+        payee_id: seller.agentId,
+        amount: 0.004,
+        currency: "USDC",
+        task_hash: `sha256:concurrent-${iteration}`,
+        sla_seconds: 30,
+        arbiter_id: arbiter.agentId,
+      };
+      const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+
+      const deliverFields = { tx_id, payee_id: seller.agentId, deliverable_hash: "sha256:concurrent-result" };
+      escrow.submitDeliverable(db, { ...deliverFields, signature: seller.sign(deliverFields) });
+
+      const reviewPayload = { tx_id, reviewer_id: buyer.agentId, outcome: "satisfied" as const, notes: null };
+      const confirmInput = {
+        tx_id,
+        payer_id: buyer.agentId,
+        signature: buyer.sign({ tx_id, payer_id: buyer.agentId }),
+        review_signature: buyer.sign(reviewPayload),
+      };
+
+      const results = await runConcurrentConfirmReleaseAttempts(dbPath, confirmInput, contenderCount);
+      const winners = results.filter((result) => result.ok);
+      const losers = results.filter((result) => !result.ok);
+
+      assert.equal(winners.length, 1, "exactly one independent contender should win the release");
+      assert.equal(losers.length, contenderCount - 1);
+      for (const loser of losers) {
+        assert.equal(loser.ok, false);
+        assert.match(
+          loser.message,
+          /has no pending delivery to confirm|no longer awaiting confirmation/,
+          "losers should be rejected as normal escrow state conflicts"
+        );
+        assert.doesNotMatch(loser.message, /SQLITE|UNIQUE|constraint/i);
+      }
+
+      const tx = getTransaction(db, tx_id);
+      assert.ok(tx);
+      assert.equal(tx.status, "released");
+      assert.equal(tx.deliverable_hash, "sha256:concurrent-result");
+      assert.notEqual(tx.resolved_at, null);
+      assert.equal(countReviewsForTx(db, tx_id), 1, "only the winning release may insert the satisfied review");
+
+      const reputation = registry.queryReputation(db, seller.agentId);
+      assert.equal(reputation.tx_count, 1);
+      assert.equal(reputation.reputation_score, 1);
+    } finally {
+      db.close();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
 });
 
 test("submit_deliverable called twice for the same tx_id: second call cannot overwrite the first hash", () => {
