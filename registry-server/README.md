@@ -72,9 +72,13 @@ for the plan to remove it.
 Still missing: step 4, the real x402 smart contract on a testnet, only
 after an external security review.
 
-## Known gap
+## SSRF hardening
 
-`identity.ts`'s SSRF guard resolves `manifest_url`'s hostname before
-fetching and rejects private/loopback ranges, but `fetch()` re-resolves DNS
-itself — a DNS-rebinding attacker controlling their own DNS could still
-slip past the check-then-fetch gap. Documented inline; not closed yet.
+`identity.ts`'s guard resolves `manifest_url`'s hostname exactly once
+(`resolveManifestTarget`), rejects private/loopback ranges, and then dials
+the pinned address directly (`httpGetPinned`) instead of letting `fetch()`
+resolve DNS a second time — closing the check-then-connect TOCTOU window a
+DNS-rebinding attacker could previously slip through. TLS SNI and
+certificate identity stay bound to the hostname, redirects are still
+refused rather than followed, and responses are capped (10s timeout, 1MB)
+so an attacker-controlled URL can't hold the registry's resources hostage.

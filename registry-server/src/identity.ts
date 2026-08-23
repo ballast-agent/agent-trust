@@ -10,6 +10,8 @@
 
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { lookup } from "node:dns/promises";
+import { request as nodeHttpRequest } from "node:http";
+import { request as nodeHttpsRequest } from "node:https";
 
 const BASE58_ALPHABET =
   "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -99,46 +101,75 @@ export interface Manifest {
   signature: string;
 }
 
+/** Lookup function shape shared by node:dns/promises's lookup and test fakes. */
+export type DnsLookup = (
+  hostname: string,
+  options: { family?: number }
+) => Promise<{ address: string; family: number }>;
+
+const DEFAULT_LOOKUP: DnsLookup = (hostname, options) => lookup(hostname, options);
+
+export interface ManifestTarget {
+  url: URL;
+  /** The single resolved IP the HTTP connection is allowed to dial. */
+  address: string;
+  family: number;
+}
+
 /**
  * manifest_url is attacker-controlled input (any registering agent can point
  * it anywhere) and this server fetches it server-side, so it's a textbook
  * SSRF vector per SECURITY_GUARDRAILS.md. Mitigations here: https-only,
  * reject redirects rather than follow them blindly, and resolve the hostname
- * to reject private/loopback/link-local ranges before connecting.
+ * to reject private/loopback/link-local ranges.
  *
- * Gap: this checks the resolved address at lookup time, not the address the
- * TCP connection actually uses (fetch() re-resolves DNS itself), so a
- * TOCTOU/DNS-rebinding attacker who controls their own DNS could still slip
- * through. Closing that fully needs a fetch implementation that connects to
- * a pinned, pre-resolved IP. Acceptable for this prototype; revisit before
- * this registry accepts registrations from untrusted parties in production.
+ * The historical gap was TOCTOU/DNS-rebinding: validating the address that
+ * DNS returns, then letting fetch() resolve DNS *again* internally, meant an
+ * attacker controlling their own zone could answer the first lookup with a
+ * public IP and the second with 169.254.169.254. fetchAndVerifyManifest now
+ * closes this structurally: this resolver resolves exactly once and returns
+ * the pinned address, and the actual request dials that address directly
+ * (see httpGetPinned) — there is no second resolution to poison. TLS SNI and
+ * certificate identity remain bound to the hostname, so a hostile IP cannot
+ * impersonate the host either.
  *
- * AGENTTRUST_ALLOW_LOCAL_MANIFESTS=true bypasses every check in this
- * function entirely. This exists solely so local demo/test scripts (see
- * demo/) can host manifests on 127.0.0.1 without a public HTTPS endpoint.
- * It must never be set outside a local dev/test process — there is no
- * partial bypass here, setting it disables SSRF protection completely.
+ * AGENTTRUST_ALLOW_LOCAL_MANIFESTS=true skips the safety validation below
+ * (https-only, public-range checks) but still resolves once and pins — the
+ * demo/test escape hatch cannot reintroduce rebinding. It must never be set
+ * outside a local dev/test process; setting it disables SSRF protection
+ * completely.
  */
-async function assertSafeManifestUrl(rawUrl: string): Promise<URL> {
+export async function resolveManifestTarget(
+  rawUrl: string,
+  deps: { lookup?: DnsLookup } = {}
+): Promise<ManifestTarget> {
+  const doLookup = deps.lookup ?? DEFAULT_LOOKUP;
   const url = new URL(rawUrl);
-  if (process.env.AGENTTRUST_ALLOW_LOCAL_MANIFESTS === "true") {
-    console.error(
-      "[identity] AGENTTRUST_ALLOW_LOCAL_MANIFESTS=true — SSRF guard fully bypassed for manifest_url. " +
-        "Dev/demo use only; never set this in production."
-    );
-    return url;
+  if (process.env.AGENTTRUST_ALLOW_LOCAL_MANIFESTS !== "true") {
+    if (url.protocol !== "https:") {
+      throw new Error("manifest_url must use https");
+    }
+    if (url.hostname === "localhost") {
+      throw new Error("manifest_url may not target localhost");
+    }
+    const { address, family } = await doLookup(stripIpv6Brackets(url.hostname), {});
+    if (isPrivateOrReservedIp(address, family)) {
+      throw new Error(`manifest_url resolves to a non-public address (${address})`);
+    }
+    return { url, address, family };
   }
-  if (url.protocol !== "https:") {
-    throw new Error("manifest_url must use https");
-  }
-  if (url.hostname === "localhost") {
-    throw new Error("manifest_url may not target localhost");
-  }
-  const { address, family } = await lookup(url.hostname);
-  if (isPrivateOrReservedIp(address, family)) {
-    throw new Error(`manifest_url resolves to a non-public address (${address})`);
-  }
-  return url;
+  console.error(
+    "[identity] AGENTTRUST_ALLOW_LOCAL_MANIFESTS=true — SSRF guard fully bypassed for manifest_url. " +
+      "Dev/demo use only; never set this in production."
+  );
+  const { address, family } = await doLookup(stripIpv6Brackets(url.hostname), {});
+  return { url, address, family };
+}
+
+function stripIpv6Brackets(hostname: string): string {
+  return hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
 }
 
 function isPrivateOrReservedIp(address: string, family: number): boolean {
@@ -204,25 +235,103 @@ export function assertValidManifestSignature(manifest: Manifest, expectedAgentId
   }
 }
 
+// An attacker-controlled manifest_url is also an abuse vector on resources:
+// without these caps a registration request could make the registry hold a
+// socket open indefinitely or buffer an arbitrarily large body
+// (SECURITY_GUARDRAILS.md: rate-limit/abuse controls for expensive actions).
+const MANIFEST_FETCH_TIMEOUT_MS = 10_000;
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+
+/**
+ * Performs the actual GET against target.address — never against a hostname,
+ * so no DNS resolution happens between validation and connection. For https,
+ * servername keeps SNI and certificate identity checks bound to the real
+ * hostname even though TCP dials the pinned IP; certificate failures still
+ * abort the request.
+ */
+function httpGetPinned(target: ManifestTarget): Promise<string> {
+  const { url } = target;
+  const isHttps = url.protocol === "https:";
+  const requester = isHttps ? nodeHttpsRequest : nodeHttpRequest;
+  return new Promise<string>((resolve, reject) => {
+    const req = requester(
+      {
+        host: target.address,
+        family: target.family,
+        port: url.port || (isHttps ? 443 : 80),
+        path: `${url.pathname}${url.search}`,
+        headers: { host: url.host },
+        // Only reachable as http when AGENTTRUST_ALLOW_LOCAL_MANIFESTS let it
+        // through resolveManifestTarget; the validated path enforces https.
+        ...(isHttps ? { servername: stripIpv6Brackets(url.hostname) } : {}),
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        if (status >= 300 && status < 400) {
+          res.destroy();
+          reject(
+            new ManifestVerificationError(
+              "manifest_url returned a redirect — redirects are not followed to avoid SSRF via redirect chains"
+            )
+          );
+          return;
+        }
+        if (status < 200 || status >= 300) {
+          res.destroy();
+          reject(new ManifestVerificationError(`manifest_url fetch failed with status ${status}`));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let received = 0;
+        res.on("data", (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > MAX_MANIFEST_BYTES) {
+            res.destroy(
+              new ManifestVerificationError(
+                `manifest_url response exceeded ${MAX_MANIFEST_BYTES} bytes`
+              )
+            );
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        res.on("error", reject);
+      }
+    );
+    req.setTimeout(MANIFEST_FETCH_TIMEOUT_MS, () => {
+      req.destroy(
+        new ManifestVerificationError(
+          `manifest_url fetch timed out after ${MANIFEST_FETCH_TIMEOUT_MS}ms`
+        )
+      );
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 /**
  * Fetches manifest_url and verifies its signature (via
- * assertValidManifestSignature) before returning it.
+ * assertValidManifestSignature) before returning it. Resolves the hostname
+ * exactly once and connects only to that pinned address — see
+ * resolveManifestTarget for why this closes the DNS-rebinding window.
  */
 export async function fetchAndVerifyManifest(
   manifestUrl: string,
-  expectedAgentId?: string
+  expectedAgentId?: string,
+  deps: { lookup?: DnsLookup } = {}
 ): Promise<Manifest> {
-  const url = await assertSafeManifestUrl(manifestUrl);
-  const response = await fetch(url, { redirect: "manual" });
-  if (response.status >= 300 && response.status < 400) {
+  const target = await resolveManifestTarget(manifestUrl, deps);
+  const body = await httpGetPinned(target);
+  let manifest: Manifest;
+  try {
+    manifest = JSON.parse(body) as Manifest;
+  } catch (err) {
     throw new ManifestVerificationError(
-      "manifest_url returned a redirect — redirects are not followed to avoid SSRF via redirect chains"
+      `manifest_url did not return valid JSON: ${(err as Error).message}`
     );
   }
-  if (!response.ok) {
-    throw new ManifestVerificationError(`manifest_url fetch failed with status ${response.status}`);
-  }
-  const manifest = (await response.json()) as Manifest;
   assertValidManifestSignature(manifest, expectedAgentId);
   return manifest;
 }
