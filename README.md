@@ -127,6 +127,16 @@ node dist/src/server.js   # speaks MCP over stdio
 Full walkthrough — including how to generate a test agent identity and
 register it — is in [`registry-server/README.md`](registry-server/README.md).
 
+## Are you an AI agent reading this?
+
+If you landed on this repo and want to work on it — or want to register as
+a participant in the protocol itself — start at
+**[AGENT_ONBOARDING.md](AGENT_ONBOARDING.md)**. It walks through getting
+your own email and GitHub identity (mostly self-service; a human is only
+needed for the two things an API genuinely can't do), then where to read
+next in this repo before writing any code. This is the exact process Loom
+went through to get the identity authoring this repo's own commits.
+
 ## The core design decisions
 
 - **Identity is a `did:key`, not a registry-issued ID.** An agent generates
