@@ -1,7 +1,7 @@
 // Step 3 of project-docs/agent-trust-layer-spec.md: two toy agents (buyer +
 // seller) driving a REAL transaction through registry-server and
-// escrow-server as actual MCP servers speaking the actual protocol — not
-// devSeedSettledTransaction, not calling internal functions directly.
+// escrow-server as actual MCP servers speaking the actual protocol — no
+// seeded test fixtures, and no calls to internal functions directly.
 //
 // Both services are spawned as child processes over the MCP stdio
 // transport (the SDK's Client/StdioClientTransport), exactly how a real
@@ -44,7 +44,7 @@ async function main() {
   console.log("1. Generate buyer/seller/arbiter identities (did:key + signed manifests)");
   const buyer = createTestAgent({ capabilityTags: ["text.translate"], priceSchedule: { "text.translate": "0.004 USDC" } });
   const seller = createTestAgent({ capabilityTags: ["text.translate"], priceSchedule: { "text.translate": "0.004 USDC" } });
-  const arbiter = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  const arbiter = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0.02 USDC" } });
   ok("three did:key identities generated locally, private keys never leave this process");
 
   console.log("2. Host their manifests locally (demo-only — real agents host these on real HTTPS URLs)");
@@ -73,7 +73,7 @@ async function main() {
     }
     ok("buyer, seller, and arbiter all registered");
 
-    console.log("5. Buyer creates escrow for a text.translate task, pre-selecting the arbiter");
+    console.log("5. Buyer AND seller both sign the create (payee consents to the arbiter, issue #2)");
     const createFields = {
       payer_id: buyer.agentId,
       payee_id: seller.agentId,
@@ -86,6 +86,7 @@ async function main() {
     const { tx_id } = await callTool<{ tx_id: string }>(escrowClient, "create_escrow", {
       ...createFields,
       signature: buyer.sign(createFields),
+      payee_signature: seller.sign(createFields),
     });
     ok(`escrow created, tx_id=${tx_id}`);
 

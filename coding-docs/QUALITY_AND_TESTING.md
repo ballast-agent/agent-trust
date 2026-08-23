@@ -170,6 +170,41 @@ Control nondeterminism. Freeze/inject clocks, random generators, UUID sources, a
 
 Flaky tests train maintainers to ignore failures.
 
+### Testing the concurrency guards (node:sqlite specifics)
+
+`node:sqlite`'s `DatabaseSync` is fully synchronous: within one JS thread
+there is no execution interleaving at all. That has two consequences for
+this repo's atomic state-transition guards (`registry-server/src/db.ts`'s
+`setTransactionStatus` / `setDeliverableHash`):
+
+1. Sequential in-process calls ("call A, then call B, assert B returned
+   false") exercise the real SQL-level CAS precondition — the guarded
+   `UPDATE ... WHERE status IN (...)` matches 0 rows on a stale read — and
+   are the cheapest reliable layer for that property.
+2. They cannot by themselves prove anything about genuine simultaneous
+   execution, because there is none in-process.
+
+What node:sqlite DOES support is multiple independent connections to the
+same database file from different threads (`worker_threads`), which gives
+real OS-level contention serialized by SQLite's own file locking.
+Empirical model (node v24, default rollback-journal mode `"delete"`):
+
+- `:memory:` databases are per-connection and cannot be shared across
+  connections or threads — concurrency tests must use a temp file.
+- Concurrent writers block each other rather than corrupting, provided
+  every connection arms `PRAGMA busy_timeout`; without it a blocked writer
+  surfaces SQLITE_BUSY immediately.
+- tsx's TS module loader propagates into workers, so workers can import
+  the REAL transition functions instead of testing a copied SQL string.
+
+The genuine-concurrency stress tests live at the bottom of
+`escrow-server/test/escrow.test.ts`: N workers × M iterations hammering
+one row via guarded transitions (asserting no BUSY errors, sane terminal
+state, intact deliverable hash), plus a first-writer-wins race on
+`setDeliverableHash`. Cleanup of temp dirs is best-effort because worker
+connections can release file handles slightly after posting results
+(Windows EPERM otherwise).
+
 ## Performance quality
 For performance-sensitive features test representative input sizes. Do not infer scalability from toy development data.
 

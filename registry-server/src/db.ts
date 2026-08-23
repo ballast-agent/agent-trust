@@ -48,6 +48,18 @@ export interface TransactionRow {
   // spec's "randomly-selected quorum of 3." "[]" for transactions created
   // before escrow-server existed (Registry-only test transactions).
   arbiter_ids: string;
+  // Optional JSON blob {"outcome":"satisfied","notes":string|null,"signature":base64}
+  // captured by escrow-server's create_escrow: the payer's advance signature
+  // over a satisfied review ({reviewer_id, outcome, notes, task_hash}),
+  // redeemed by escrow-server's sweep_auto_release ONLY if the transaction
+  // actually resolves through that automatic path. Null when not provided.
+  pre_signed_review: string | null;
+  // For registry_quorum-selected arbiters: hex sha256 seed over inputs
+  // neither transacting party controls alone (server-generated tx_id,
+  // server clock at creation, registry-wide agent count). Stored so the
+  // quorum selection is auditable/recomputable against the arbitration
+  // pool. Null for single-arbiter escrows.
+  arbiter_seed: string | null;
   created_at: number;
   // Set when submitDeliverable moves status to 'verified' — the clock the
   // Escrow Layer's auto-release grace window (spec §3 step 5) counts from.
@@ -90,6 +102,8 @@ CREATE TABLE IF NOT EXISTS transactions (
   status TEXT NOT NULL CHECK (status IN ('pending','escrowed','verified','released','disputed','refunded','slashed')),
   escrow_deadline INTEGER,
   arbiter_ids TEXT NOT NULL DEFAULT '[]',
+  pre_signed_review TEXT,
+  arbiter_seed TEXT,
   created_at INTEGER NOT NULL,
   delivered_at INTEGER,
   resolved_at INTEGER
@@ -113,6 +127,18 @@ export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
+  // Additive migrations for database files created before a column existed.
+  // CREATE TABLE IF NOT EXISTS can't add columns to an existing table, and
+  // both services share one file that may predate the column (DATA_AND_STATE.md:
+  // destructive changes need a plan; additive ones just need a guard).
+  const transactionColumns = (
+    db.prepare("PRAGMA table_info(transactions)").all() as { name: string }[]
+  ).map((column) => column.name);
+  for (const addedColumn of ["pre_signed_review", "arbiter_seed"]) {
+    if (!transactionColumns.includes(addedColumn)) {
+      db.exec(`ALTER TABLE transactions ADD COLUMN ${addedColumn} TEXT;`);
+    }
+  }
   return db;
 }
 
@@ -164,6 +190,14 @@ export function listAgentsByCapability(db: DatabaseSync, capabilityTag: string):
   });
 }
 
+/** Registry-wide agent count — one of the inputs escrow-server hashes into
+ * its arbiter-quorum seed, since any participant's registrations shift it
+ * and neither transacting party controls it alone. */
+export function countAgents(db: DatabaseSync): number {
+  const row = db.prepare("SELECT COUNT(*) as count FROM agents").get() as { count: number };
+  return row.count;
+}
+
 export function reduceStake(db: DatabaseSync, agentId: string, amount: number): void {
   db.prepare(
     "UPDATE agents SET stake_amount = MAX(0, stake_amount - ?) WHERE agent_id = ?"
@@ -179,8 +213,9 @@ export function getTransaction(db: DatabaseSync, txId: string): TransactionRow |
 export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
   db.prepare(
     `INSERT INTO transactions (tx_id, payer_id, payee_id, amount, currency, task_hash,
-       deliverable_hash, status, escrow_deadline, arbiter_ids, created_at, delivered_at, resolved_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       deliverable_hash, status, escrow_deadline, arbiter_ids, pre_signed_review,
+       arbiter_seed, created_at, delivered_at, resolved_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.tx_id,
     row.payer_id,
@@ -192,10 +227,18 @@ export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
     row.status,
     row.escrow_deadline,
     row.arbiter_ids,
+    row.pre_signed_review,
+    row.arbiter_seed,
     row.created_at,
     row.delivered_at,
     row.resolved_at
   );
+}
+
+export function hasReview(db: DatabaseSync, txId: string, reviewerId: string): boolean {
+  return db
+    .prepare("SELECT 1 FROM reviews WHERE tx_id = ? AND reviewer_id = ?")
+    .get(txId, reviewerId) !== undefined;
 }
 
 /**
