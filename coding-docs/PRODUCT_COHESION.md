@@ -8,6 +8,16 @@
 >
 > **Build one coherent product, not a collection of individually good features.**
 
+**AgentTrust has no UI and no human end-user.** "User-facing feature"
+means an MCP tool; "screen" or "page" means nothing here — there is no
+navigation to sprawl. Translate this file as you read it: the "user" is a
+*calling agent* (or the human/policy behind it), the "product" is the
+combined tool surface of `registry-server` + `escrow-server`, and
+"cohesion" means the same thing it always means — don't let two tools grow
+inconsistent conventions for the same concept (e.g. don't add a second way
+to express "who's allowed to do this" alongside the existing
+signature-verification pattern every tool already uses).
+
 ---
 
 ## 1. Core Principle
@@ -78,42 +88,57 @@ Before making significant additions, establish or update the following section.
 
 ### Primary user
 
-<!-- Describe the main user in one or two sentences. -->
+An AI agent (or the human/policy configuring it) acting as either a
+**payer** (needs work done, willing to pay) or a **payee** (offers a
+capability, wants to get paid) — the same agent can be both across
+different transactions.
 
 ### Primary job
 
-<!-- What is the main thing the user comes here to accomplish? -->
+**Decide whether to trust a specific counterparty for a specific
+transaction, then transact without either party having to trust the other
+to go first.** See [trust-evaluation-guide.md](../project-docs/trust-evaluation-guide.md)
+for the decision procedure and [agent-trust-layer-spec.md](../project-docs/agent-trust-layer-spec.md)
+for the transaction mechanics.
 
 ### Primary object
 
-<!--
-What is the main thing the user works with?
-Examples: Dataset, Document, Project, Dream, Invoice, Campaign, Note.
--->
+**Transaction** — one escrowed unit of paid work between two agents, from
+creation through delivery to release/dispute resolution. Everything else
+(Agent, Review, stake) exists to make a Transaction trustworthy.
 
 ### Supporting objects
 
-<!--
-List only concepts that genuinely need to exist in the user's mental model.
--->
-
-| Object | Purpose | Relationship to primary object |
+| Object | Purpose | Relationship to Transaction |
 |---|---|---|
-| | | |
+| Agent | A `did:key` identity with a signed manifest, stake, and reputation | Is the payer or payee of a Transaction |
+| Review | Signed outcome record | Belongs to exactly one settled Transaction |
+| Manifest | Signed capability + price declaration | Describes what an Agent claims it can do, at what price |
+
+No separate "Job", "Order", "Escrow Contract", or "Payment" object —
+**Transaction** is the one noun for a unit of paid work throughout its
+lifecycle (escrowed → delivered → released/disputed/refunded/slashed).
 
 ### Core workflow
 
 ```text
 START
   ↓
-[Step]
+Payer queries the Registry for a trustworthy specialist (query_by_capability)
   ↓
-[Step]
+Payer creates escrow, pre-selecting an arbiter (create_escrow)
   ↓
-[Step]
+Payee delivers (submit_deliverable)
   ↓
-OUTCOME
+Payer confirms (confirm_release) — funds release, review auto-recorded
+  ↓
+OUTCOME: Payer has its result; Payee has payment + an updated reputation score
 ```
+
+Every tool added to either service should sit on this workflow or on the
+Agent-identity layer that supports it (registration, manifest
+verification). If a proposed tool doesn't extend this loop, reconsider
+whether it belongs in these two services at all.
 
 Every major feature should support this workflow, extend it naturally, or clearly support a secondary workflow.
 
@@ -352,7 +377,13 @@ Define the standard patterns below and reuse them.
 
 ## Product interaction grammar
 
-<!-- Customize this section for the project. -->
+This table (and the rest of this doc from here on — visual patterns,
+screens) is UI interaction grammar and does not apply to AgentTrust; see
+the no-UI note at the top of this file. The equivalent discipline for a
+tool surface is: every tool's success/error result shape follows the same
+convention (see `textResult`/`errorResult` in either service's
+`server.ts`), and every state-changing tool follows the same
+signature-verification pattern rather than inventing a new one per tool.
 
 | Interaction | Standard pattern |
 |---|---|

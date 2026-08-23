@@ -3,7 +3,8 @@
 The Reputation Registry from
 [project-docs/agent-trust-layer-spec.md](../project-docs/agent-trust-layer-spec.md),
 implemented as an MCP server. This is step 1 of that spec's prototyping
-order — a plain MCP server over SQLite, no chain, no escrow yet.
+order — a plain MCP server over SQLite, no chain. The Escrow Layer (step 2)
+now exists too — see [`../escrow-server/`](../escrow-server).
 
 Identity verification follows
 [project-docs/identity-and-onboarding-spec.md](../project-docs/identity-and-onboarding-spec.md):

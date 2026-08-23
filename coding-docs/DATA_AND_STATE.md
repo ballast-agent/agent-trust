@@ -314,11 +314,12 @@ Usage totals cannot become negative.
 A deleted parent cannot leave active invalid children.
 ```
 
-Add yours:
+AgentTrust's invariants:
 
-- [ ] ________________________________________
-- [ ] ________________________________________
-- [ ] ________________________________________
+- [x] `reputation_score` is never stored — it's computed on read by `scoring.ts`'s value-weighted, time-decayed formula from settled reviews, so it can never drift out of sync with the underlying data (see `registry-server/README.md`'s design note).
+- [x] A `Review` can only be inserted against a `Transaction` whose status is in `SETTLED_STATUSES` (`released`/`refunded`/`slashed`) — enforced in `submitReview`, not just documented. No transaction, no review; no unsettled transaction, no review either.
+- [x] The `transactions` table has exactly one owner (`registry-server/src/db.ts`); `escrow-server` mutates it through that same module's functions, never through a second connection with its own schema assumptions.
+- [x] `stake_amount` only changes through `reduceStake` (called by `slash_stake`, itself only reachable via a verified arbitration-capable signature) — never decremented anywhere else.
 
 ## Standing instruction before adding state
 Before creating a store, field, cache, or persistence layer:

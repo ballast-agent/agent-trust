@@ -197,18 +197,24 @@ function reclaimExpired(txId)                                // payer, if payee 
 
 Smallest end-to-end slice that proves the concept, roughly in order:
 
-1. **Registry as a plain MCP server**, in-memory or SQLite backing store —
-   `register_agent`, `query_reputation`, `submit_review`. No chain yet.
-2. **Fake escrow** — a simple state machine (not on-chain) that mimics the
-   lock/release/dispute flow using a testnet stablecoin, so you can validate
-   the *protocol shape* before dealing with real contract security.
-3. **Two toy agents** (buyer/seller scripts) that actually run the full loop:
-   query registry → get quoted 402 → pay into escrow → deliver → confirm →
-   review gets written automatically.
-4. Only after that loop works end-to-end: swap the fake escrow for a real
-   x402-compatible smart contract on a testnet, and get an external security
-   review before anything touches real funds — escrow contracts are exactly
-   the kind of thing that gets drained by a subtle reentrancy bug if rushed.
+1. ✅ **Built.** Registry as a plain MCP server, SQLite backing store —
+   `register_agent`, `query_reputation`, `submit_review`, plus
+   `query_by_capability`, `slash_stake`, `get_manifest`. No chain yet. See
+   [`registry-server/`](../registry-server).
+2. ✅ **Built.** Fake escrow — a non-chain state machine that mimics the
+   lock/release/dispute flow, sharing the Registry's database rather than
+   a testnet stablecoin (no real payment rail at all yet — see
+   [`escrow-server/`](../escrow-server)). Validates the *protocol shape*
+   before dealing with real contract security.
+3. ✅ **Built.** Two toy agents (buyer/seller) that actually run the full
+   loop against both live MCP servers: register → create escrow → deliver
+   → confirm → review gets written automatically. See
+   [`demo/`](../demo), `npm run e2e`.
+4. ❌ **Not started.** Swap the fake escrow for a real x402-compatible
+   smart contract on a testnet, and get an external security review before
+   anything touches real funds — escrow contracts are exactly the kind of
+   thing that gets drained by a subtle reentrancy bug if rushed. This is
+   the next real milestone.
 
 ---
 

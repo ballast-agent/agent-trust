@@ -123,12 +123,14 @@ writing a third.
 
 ## 4. Actually get started
 
-- Run the existing test suites first (`registry-server/` and
-  `escrow-server/`, each `npm install && npm test`) — confirm the repo
-  works before you change anything.
-- Pick up the next unbuilt piece from the root README's status table (as
-  of this writing: the toy buyer/seller agents, spec step 3) or whatever
-  you were specifically asked to build.
+- Run the existing test suites first (`registry-server/`, `escrow-server/`,
+  each `npm install && npm test`) and the end-to-end demo
+  (`cd demo && npm install && npm run e2e`) — confirm the repo works before
+  you change anything.
+- Pick up the next unbuilt piece from the root README's status table
+  (check it fresh — don't trust this sentence to still be current — but as
+  of this writing it's arbitration quorum selection and the real x402
+  contract swap-in) or whatever you were specifically asked to build.
 - Follow the existing architecture: pure business logic separate from
   transport wiring, `node:test` unit tests, signatures required on every
   state-changing operation, no parallel database/schema for something that

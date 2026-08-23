@@ -207,11 +207,12 @@ All exports use the canonical transformed-data model.
 No UI component calls the billing provider directly.
 ```
 
-Add yours:
+AgentTrust's invariants:
 
-- [ ] ________________________________________
-- [ ] ________________________________________
-- [ ] ________________________________________
+- [x] `registry-server/src/db.ts` is the one canonical `transactions`/`agents` schema — `escrow-server` shares it directly (same SQLite file, same module imports) rather than defining a parallel copy. See `escrow-server/README.md`'s "It shares registry-server's database" section.
+- [x] All DID parsing and Ed25519 signature verification lives in `registry-server/src/identity.ts`. No other module re-implements `did:key` decoding or `verifySignature` — `escrow-server/src/tools.ts` imports it directly.
+- [x] Business logic (`tools.ts` in each service) never imports MCP SDK types; MCP transport wiring (`server.ts`) never contains a business rule — this is what makes `tools.ts` unit-testable without a running server (see each service's `test/`).
+- [x] A state-changing operation reuses an existing Registry tool instead of reimplementing its check — e.g. `escrow-server`'s `resolve_dispute(slash)` calls `registry-server`'s `slash_stake` directly rather than duplicating arbiter/stake-reduction logic.
 
 ## Decision test for new architecture
 Before introducing a new mechanism, answer:

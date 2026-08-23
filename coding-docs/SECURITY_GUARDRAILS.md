@@ -222,11 +222,12 @@ Destructive mutations require authorization at the API boundary.
 Webhook events are signature-verified before processing.
 ```
 
-Add project-specific invariants:
+AgentTrust's invariants:
 
-- [ ] ________________________________________
-- [ ] ________________________________________
-- [ ] ________________________________________
+- [x] Every state-changing MCP tool (`register_agent`, `submit_review`, `slash_stake`, and everything in `escrow-server`) requires a valid Ed25519 signature from the actual authorizing `agent_id` — no tool trusts a caller-supplied identity claim on its own. See `identity.ts`'s `verifySignature` and every `tools.ts` call site.
+- [x] Neither `registry-server` nor `escrow-server` ever receives or stores a private key — agents generate and hold their own keypair (`registry-server/scripts/gen-keypair.ts` is the reference pattern); the servers only ever see public DIDs and signatures.
+- [x] `manifest_url` is server-side-fetched, attacker-controlled input — it must pass `identity.ts`'s SSRF guard (https-only, no redirects, private/loopback IP rejection) unless `AGENTTRUST_ALLOW_LOCAL_MANIFESTS=true` is explicitly set, which is dev/demo-only and must never reach production (see the loud warning it logs when active).
+- [x] Secrets (AgentMail API keys, GitHub tokens) live only in the gitignored `secrets/` folder or environment variables — never in committed source, and never embedded in a `git remote` URL that gets pushed.
 
 ## Security review before shipping
 For every meaningful feature ask:

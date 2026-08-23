@@ -2,6 +2,19 @@
 
 > Standing instruction for AI coding agents. Read before modifying critical workflows, fixing bugs, introducing important behavior, adding tests, or preparing a release.
 
+**AgentTrust has no UI.** Everything here about screens, mobile viewports,
+accessibility, and responsive/RTL text does not apply — this is a pair of
+headless MCP servers plus a demo script. Translate as you read: "critical
+user journeys" means the tool-call sequences in `demo/src/e2e-demo.ts`
+(register → create_escrow → submit_deliverable → confirm_release →
+query_reputation), "UI states" means a tool call's success/error result
+shape, and "authorization tests" means signature-verification tests
+(exactly what `registry-server/test/registry.test.ts` and
+`escrow-server/test/escrow.test.ts` already do — read one before adding a
+test elsewhere in this project). The underlying principle — protect
+critical flows and invariants, not implementation details — still fully
+applies.
+
 ## Core principle
 AI can generate huge quantities of tests that prove very little.
 
@@ -268,21 +281,20 @@ Are unreliable tests being ignored?
 Are tests preserving behavior that no longer exists?
 
 ## Project critical journeys
-Fill these in:
 
-1. ________________________________________
-2. ________________________________________
-3. ________________________________________
-4. ________________________________________
-5. ________________________________________
+1. `register_agent` with a correctly signed manifest and sufficient stake succeeds; with a tampered manifest, mismatched wallet, or insufficient stake, it fails — see `registry-server/test/registry.test.ts`.
+2. `create_escrow` → `submit_deliverable` → `confirm_release` releases funds and writes a satisfied review in one pass — see `escrow-server/test/escrow.test.ts`'s "full happy path" test and `demo/src/e2e-demo.ts` end to end.
+3. `raise_dispute` → `resolve_dispute(slash)` correctly delegates to and reduces stake via the Registry's own `slash_stake`, and rejects an arbiter that wasn't pre-selected at escrow creation.
+4. `reclaimExpired` refuses before the SLA deadline and succeeds after it.
+5. `query_reputation`'s decayed, value-weighted score reflects real settled reviews, not a stale cached value (there is no cache to go stale — see `DATA_AND_STATE.md`'s AgentTrust invariant on this).
 
 ## Project invariants to test
 
-- [ ] ________________________________________
-- [ ] ________________________________________
-- [ ] ________________________________________
-- [ ] ________________________________________
-- [ ] ________________________________________
+- [x] No review can attach to a non-settled transaction (`submit_review rejects reviews against a non-settled transaction`).
+- [x] A forged signature (real party's payload, wrong party's key) is rejected everywhere a signature is required, not just on the "happy" signer.
+- [x] `slash_stake`/`resolve_dispute(slash)` only succeeds for a registered agent with the `arbitration` capability tag, pre-selected at escrow creation.
+- [x] Stake gating (`required_stake >= K × max_price`) is enforced server-side at registration, not merely documented.
+- [ ] Concurrent/duplicate calls to the same tool with the same `tx_id` (e.g. two `confirm_release` calls racing) — not yet tested; worth adding before this handles anything but toy amounts.
 
 ## Standing instruction to AI agents
 When adding tests:

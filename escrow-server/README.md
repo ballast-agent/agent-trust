@@ -86,6 +86,8 @@ auto-release actually triggers.
 
 ## What's still not here
 
-Per the parent spec's ordering (§6): the two toy buyer/seller agents (step
-3) that actually drive this end-to-end, and the real x402 smart contract
-swap-in (step 4) — this remains entirely off-chain.
+The two toy buyer/seller agents (step 3) are now built — see
+[`../demo/`](../demo), which drives this service end-to-end alongside
+`registry-server`. Still missing per the parent spec's ordering (§6): the
+real x402 smart contract swap-in (step 4) — this remains entirely
+off-chain until then.

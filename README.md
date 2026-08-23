@@ -10,13 +10,14 @@ recourse if it does? AgentTrust is a minimal, prototypeable answer:
 - A **Reputation Registry** that only lets reviews attach to real, settled,
   escrow-cleared transactions — so reputation can't be bought with fake
   five-star ratings, only earned by actually moving money.
-- An **Escrow Layer** *(not yet built — see [Status](#status))* that holds
-  payment locked until a deliverable is confirmed, so neither side has to
-  trust the other to go first.
+- An **Escrow Layer** that holds payment locked until a deliverable is
+  confirmed, so neither side has to trust the other to go first.
 
-> **Status: early prototype.** Unaudited, not connected to real funds, and
-> missing the escrow layer entirely. Read this before building on it — see
-> [Status](#status) for exactly what exists today.
+Both are built and proven working end to end (see
+[Status](#status)) — but this is still an early, unaudited prototype with
+no real payment rail: everything settles in a local SQLite ledger, not
+real funds. Read [Status](#status) for exactly what exists today versus
+what's still spec-only.
 
 ---
 
@@ -49,21 +50,19 @@ sequenceDiagram
     participant Escrow
     participant Arbiter
 
-    Buyer->>Registry: query_by_capability("csv-parsing", min_rep=0.85)
+    Buyer->>Registry: query_by_capability("text.translate", min_reputation=0.85)
     Registry-->>Buyer: Seller (reputation, price, stake)
-    Buyer->>Seller: call endpoint
-    Seller-->>Buyer: 402 Payment Required (amount, task_hash)
-    Buyer->>Escrow: lock funds under tx_id
+    Buyer->>Escrow: create_escrow(payer, payee, amount, arbiter) — signed
     Escrow->>Registry: query_reputation(Seller)  — sanity check before accepting
-    Seller->>Buyer: deliver + deliverable_hash
+    Seller->>Escrow: submit_deliverable(tx_id, deliverable_hash) — signed
     alt happy path
-        Buyer->>Escrow: confirm(tx_id)
+        Buyer->>Escrow: confirm_release(tx_id) + a signed review, in one call
         Escrow->>Seller: release funds
-        Escrow->>Registry: submit_review(tx_id, satisfied) — automatic
+        Escrow->>Registry: submit_review(tx_id, satisfied) — using the buyer's signature
     else dispute
-        Buyer->>Escrow: dispute(tx_id, reason)
-        Escrow->>Arbiter: resolve(tx_id)
-        Arbiter->>Registry: slash_stake or release, depending on finding
+        Buyer->>Escrow: raise_dispute(tx_id, reason) — signed
+        Escrow->>Arbiter: resolve_dispute(tx_id)
+        Arbiter->>Registry: slash_stake, or release/refund, depending on finding
     end
 ```
 
@@ -81,7 +80,8 @@ workable between two parties with zero human oversight.
 | Trust-evaluation decision procedure | ✅ Documented — see [trust-evaluation guide](project-docs/trust-evaluation-guide.md) |
 | Escrow Layer (lock/release/dispute state machine) | ✅ Built — [`escrow-server/`](escrow-server), shares registry-server's database |
 | Toy buyer/seller agents (end-to-end demo) | ✅ Built — [`demo/`](demo), drives both live MCP servers, not internal function calls |
-| Arbitration Agent pool | ❌ Not built |
+| Single pre-selected arbiter (dispute → release/refund/slash) | ✅ Built — `escrow-server`'s `resolve_dispute` |
+| Arbitration quorum pool (spec's "quorum of 3") | ❌ Not built — currently one arbiter, chosen at escrow creation |
 | Real x402/on-chain settlement | ❌ Not built — testnet only, after everything above works |
 
 This is the order the [parent spec](project-docs/agent-trust-layer-spec.md)
