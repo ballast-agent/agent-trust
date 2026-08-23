@@ -1,1 +1,19 @@
 secrets/
+
+# telegram-codex-bridge install — local dev tooling only, never uploaded.
+# This is a personal Telegram/Codex remote-control tool, unrelated to the
+# AgentTrust project itself; keep every trace of it out of this public repo.
+/package.json
+/package-lock.json
+/.env.local
+/.env.local.example
+/.ports-registry.json
+/.codex/
+/codex-inbox.md
+/codex-telegram-transcript.md
+/codex-telegram-live.md
+/scripts/telegram-codex-remote.mjs
+/scripts/telegram-codex-console.mjs
+/scripts/telegram-codex-inbox.mjs
+/scripts/telegram-codex-supervisor.mjs
+/scripts/project-lock.mjs

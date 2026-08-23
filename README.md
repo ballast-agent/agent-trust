@@ -79,7 +79,7 @@ workable between two parties with zero human oversight.
 | Reputation Registry (MCP server, SQLite) | ✅ Built — [`registry-server/`](registry-server) |
 | DID-based identity + manifest verification | ✅ Built — see [identity spec](project-docs/identity-and-onboarding-spec.md) |
 | Trust-evaluation decision procedure | ✅ Documented — see [trust-evaluation guide](project-docs/trust-evaluation-guide.md) |
-| Escrow Layer (lock/release/dispute state machine) | ❌ Not built |
+| Escrow Layer (lock/release/dispute state machine) | ✅ Built — [`escrow-server/`](escrow-server), shares registry-server's database |
 | Toy buyer/seller agents (end-to-end demo) | ❌ Not built |
 | Arbitration Agent pool | ❌ Not built |
 | Real x402/on-chain settlement | ❌ Not built — testnet only, after everything above works |
@@ -102,6 +102,11 @@ registry-server/
   src/                             the Reputation Registry, as an MCP server
   test/                            unit tests — signature verification, stake gating, review rules
   README.md                        how to run it, how to register a test agent by hand
+
+escrow-server/
+  src/                             the Escrow Layer, as an MCP server sharing registry-server's database
+  test/                            unit tests — lock/deliver/confirm/dispute/reclaim, all signature-checked
+  README.md                        why it shares a database, how to run both services together
 
 coding-docs/
   standing AI-coding-hygiene rules this project holds itself to

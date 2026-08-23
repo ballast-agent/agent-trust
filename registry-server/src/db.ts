@@ -42,7 +42,15 @@ export interface TransactionRow {
   deliverable_hash: string | null;
   status: TransactionStatus;
   escrow_deadline: number | null;
+  // Pre-selected at escrow creation per agent-trust-layer-spec.md §4 — "not
+  // after-the-fact, so neither side can shop for a friendly arbiter." Null
+  // for transactions created before escrow-server existed / that never
+  // specified one (Registry-only test transactions).
+  arbiter_id: string | null;
   created_at: number;
+  // Set when submitDeliverable moves status to 'verified' — the clock the
+  // Escrow Layer's auto-release grace window (spec §3 step 5) counts from.
+  delivered_at: number | null;
   resolved_at: number | null;
 }
 
@@ -80,7 +88,9 @@ CREATE TABLE IF NOT EXISTS transactions (
   deliverable_hash TEXT,
   status TEXT NOT NULL CHECK (status IN ('pending','escrowed','verified','released','disputed','refunded','slashed')),
   escrow_deadline INTEGER,
+  arbiter_id TEXT,
   created_at INTEGER NOT NULL,
+  delivered_at INTEGER,
   resolved_at INTEGER
 );
 
@@ -166,8 +176,8 @@ export function getTransaction(db: DatabaseSync, txId: string): TransactionRow |
 export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
   db.prepare(
     `INSERT INTO transactions (tx_id, payer_id, payee_id, amount, currency, task_hash,
-       deliverable_hash, status, escrow_deadline, created_at, resolved_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       deliverable_hash, status, escrow_deadline, arbiter_id, created_at, delivered_at, resolved_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.tx_id,
     row.payer_id,
@@ -178,9 +188,28 @@ export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
     row.deliverable_hash,
     row.status,
     row.escrow_deadline,
+    row.arbiter_id,
     row.created_at,
+    row.delivered_at,
     row.resolved_at
   );
+}
+
+export function setDeliverableHash(db: DatabaseSync, txId: string, deliverableHash: string): void {
+  db.prepare(
+    "UPDATE transactions SET deliverable_hash = ?, delivered_at = ? WHERE tx_id = ?"
+  ).run(deliverableHash, Date.now(), txId);
+}
+
+export function listVerifiedTransactionsOlderThan(
+  db: DatabaseSync,
+  deliveredBeforeMs: number
+): TransactionRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM transactions WHERE status = 'verified' AND delivered_at IS NOT NULL AND delivered_at < ?`
+    )
+    .all(deliveredBeforeMs) as unknown as TransactionRow[];
 }
 
 export function setTransactionStatus(

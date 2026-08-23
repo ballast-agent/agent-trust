@@ -58,13 +58,16 @@ identity spec §3 for why 50).
 
 ## What's not here yet
 
-Per the parent spec's prototyping order (§6): the Escrow Layer (step 2) and
-the two toy buyer/seller agents that drive a transaction end-to-end
-(step 3). Until those exist, `tools.ts` exports a
-`devSeedSettledTransaction` helper — explicitly not part of the public tool
-surface — so `submit_review`/`slash_stake`/`query_reputation` can be
-exercised locally. It's marked with a removal TODO once the Escrow Layer
-can produce real settled transactions.
+The Escrow Layer (step 2) is now built — see
+[`../escrow-server/`](../escrow-server), which shares this service's
+database rather than duplicating the transactions table. Still missing per
+the parent spec's prototyping order (§6): the two toy buyer/seller agents
+that drive a transaction end-to-end (step 3). Until those exist, `tools.ts`
+still exports `devSeedSettledTransaction` — explicitly not part of the
+public tool surface — as a lighter-weight way to seed a settled transaction
+for tests than running the full escrow-server flow. Marked with a removal
+TODO once the toy agents exist and tests can drive real transactions
+through `escrow-server` instead.
 
 ## Known gap
 

@@ -308,7 +308,9 @@ export function devSeedSettledTransaction(
     deliverable_hash: null,
     status: params.status,
     escrow_deadline: null,
+    arbiter_id: null,
     created_at: now,
+    delivered_at: null,
     resolved_at: params.status === "disputed" ? null : now,
   });
   return { tx_id };
