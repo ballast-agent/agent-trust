@@ -240,8 +240,17 @@ export function slashStake(database: DatabaseSync, input: SlashStakeInput) {
     throw new RegistryError("authorization signature does not match arbiter_id's key");
   }
 
+  // Atomic transition first, side effect second — not the other way
+  // around. Two concurrent slash_stake calls (or a slash racing a
+  // resolve_dispute release/refund) must not both reduce stake: only the
+  // call that actually wins the disputed -> slashed transition may apply
+  // it. Reducing stake before checking here would let a losing call's
+  // reduceStake land even though its own status write then fails.
+  const applied = db.setTransactionStatus(database, input.tx_id, ["disputed"], "slashed", Date.now());
+  if (!applied) {
+    throw new RegistryError(`tx_id ${input.tx_id} is no longer disputed — resolved concurrently`);
+  }
   db.reduceStake(database, input.agent_id, tx.amount);
-  db.setTransactionStatus(database, input.tx_id, "slashed", Date.now());
 
   return { ack: true };
 }

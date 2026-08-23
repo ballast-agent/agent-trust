@@ -320,6 +320,7 @@ AgentTrust's invariants:
 - [x] A `Review` can only be inserted against a `Transaction` whose status is in `SETTLED_STATUSES` (`released`/`refunded`/`slashed`) — enforced in `submitReview`, not just documented. No transaction, no review; no unsettled transaction, no review either.
 - [x] The `transactions` table has exactly one owner (`registry-server/src/db.ts`); `escrow-server` mutates it through that same module's functions, never through a second connection with its own schema assumptions.
 - [x] `stake_amount` only changes through `reduceStake` (called by `slash_stake`, itself only reachable via a verified arbitration-capable signature) — never decremented anywhere else.
+- [x] Every `transactions.status` transition is a single atomic `UPDATE ... WHERE status = ?` (`db.ts`'s `setTransactionStatus`/`setDeliverableHash`), never a separate read-then-write — a losing concurrent call gets `changes: 0` and must be rejected, not silently reapplied on top of a status it never actually observed.
 
 ## Standing instruction before adding state
 Before creating a store, field, cache, or persistence layer:

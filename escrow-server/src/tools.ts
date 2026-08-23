@@ -165,12 +165,17 @@ export function submitDeliverable(database: DatabaseSync, input: SubmitDeliverab
   const payload = { tx_id: input.tx_id, payee_id: input.payee_id, deliverable_hash: input.deliverable_hash };
   verifyPartySignature(payload, input.payee_id, input.signature, "submitDeliverable");
 
-  db.setDeliverableHash(database, input.tx_id, input.deliverable_hash);
   // "verified" here means "delivered, awaiting the payer's confirmation" —
   // reusing the Registry's existing status enum rather than adding a new
   // value for what registry-server's TransactionStatus already calls
-  // "verified" (see agent-trust-layer-spec.md §1's status enum).
-  db.setTransactionStatus(database, input.tx_id, "verified", null);
+  // "verified" (see agent-trust-layer-spec.md §1's status enum). Atomic:
+  // guards against two concurrent submit_deliverable calls both applying.
+  const applied = db.setDeliverableHash(database, input.tx_id, input.deliverable_hash, Date.now());
+  if (!applied) {
+    throw new EscrowError(
+      `tx_id ${input.tx_id} is no longer awaiting delivery — already delivered or moved on concurrently`
+    );
+  }
 
   return { ack: true };
 }
@@ -207,7 +212,17 @@ export function confirmRelease(database: DatabaseSync, input: ConfirmReleaseInpu
 
   verifyPartySignature({ tx_id: input.tx_id, payer_id: input.payer_id }, input.payer_id, input.signature, "confirmRelease");
 
-  db.setTransactionStatus(database, input.tx_id, "released", Date.now());
+  // Atomic: only one of two concurrent confirm_release calls for the same
+  // tx_id can win this transition. The loser must never reach
+  // submit_review below — that's what would otherwise write two reviews
+  // (or hit a raw, unfriendly UNIQUE-constraint error from the reviews
+  // table's (tx_id, reviewer_id) primary key instead of a clean rejection).
+  const applied = db.setTransactionStatus(database, input.tx_id, ["verified"], "released", Date.now());
+  if (!applied) {
+    throw new EscrowError(
+      `tx_id ${input.tx_id} is no longer awaiting confirmation — already confirmed or moved on concurrently`
+    );
+  }
 
   registry.submitReview(database, {
     tx_id: input.tx_id,
@@ -242,7 +257,14 @@ export function raiseDispute(database: DatabaseSync, input: RaiseDisputeInput) {
   const payload = { tx_id: input.tx_id, disputer_id: input.disputer_id, reason: input.reason };
   verifyPartySignature(payload, input.disputer_id, input.signature, "raiseDispute");
 
-  db.setTransactionStatus(database, input.tx_id, "disputed", null);
+  // Atomic: closes the race against a concurrent confirm_release (or
+  // reclaim_expired) — only one of them can win depending on write order,
+  // and the loser must be rejected rather than silently applied on top of
+  // an already-moved transaction.
+  const applied = db.setTransactionStatus(database, input.tx_id, ["escrowed", "verified"], "disputed", null);
+  if (!applied) {
+    throw new EscrowError(`tx_id ${input.tx_id} could not be disputed — status changed concurrently`);
+  }
   return { ack: true };
 }
 
@@ -340,7 +362,13 @@ export function resolveDispute(database: DatabaseSync, input: ResolveDisputeInpu
   }
 
   const newStatus: db.TransactionStatus = input.outcome === "release" ? "released" : "refunded";
-  db.setTransactionStatus(database, input.tx_id, newStatus, Date.now());
+  // Atomic: guards against a second resolve_dispute call (e.g. a
+  // conflicting outcome, or a duplicate) applying after this one already
+  // resolved the dispute.
+  const applied = db.setTransactionStatus(database, input.tx_id, ["disputed"], newStatus, Date.now());
+  if (!applied) {
+    throw new EscrowError(`tx_id ${input.tx_id} is no longer disputed — resolved concurrently`);
+  }
   return { ack: true, status: newStatus };
 }
 
@@ -367,7 +395,11 @@ export function reclaimExpired(database: DatabaseSync, input: ReclaimExpiredInpu
 
   verifyPartySignature({ tx_id: input.tx_id, payer_id: input.payer_id }, input.payer_id, input.signature, "reclaimExpired");
 
-  db.setTransactionStatus(database, input.tx_id, "refunded", Date.now());
+  // Atomic: guards against racing a concurrent submit_deliverable/raise_dispute.
+  const applied = db.setTransactionStatus(database, input.tx_id, ["escrowed"], "refunded", Date.now());
+  if (!applied) {
+    throw new EscrowError(`tx_id ${input.tx_id} could not be reclaimed — status changed concurrently`);
+  }
   return { ack: true, status: "refunded" as const };
 }
 
@@ -389,8 +421,11 @@ export function sweepAutoRelease(database: DatabaseSync, graceMs: number = AUTO_
   const candidates = db.listVerifiedTransactionsOlderThan(database, now - graceMs);
   const released: string[] = [];
   for (const tx of candidates) {
-    db.setTransactionStatus(database, tx.tx_id, "released", now);
-    released.push(tx.tx_id);
+    // Atomic, and skip (not error) on a lost race — a concurrent
+    // confirm_release/raise_dispute for the same tx_id between the list
+    // query above and this write is a normal outcome for a sweep, not a bug.
+    const applied = db.setTransactionStatus(database, tx.tx_id, ["verified"], "released", now);
+    if (applied) released.push(tx.tx_id);
   }
   return { released_tx_ids: released };
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { openDatabase } from "../../registry-server/src/db.js";
+import { openDatabase, setTransactionStatus, setDeliverableHash, getTransaction } from "../../registry-server/src/db.js";
 import * as registry from "../../registry-server/src/tools.js";
 import { requiredStake } from "../../registry-server/src/scoring.js";
 import { createTestAgent, type TestAgent } from "../../registry-server/test/helpers.js";
@@ -178,6 +178,244 @@ test("full happy path: create -> deliver -> confirm releases funds and writes a 
   const reputation = registry.queryReputation(db, seller.agentId);
   assert.equal(reputation.tx_count, 1);
   assert.equal(reputation.reputation_score, 1);
+});
+
+// --- Concurrency/idempotency hardening -------------------------------------
+// Two "concurrent" MCP tool calls for the same tx_id can't actually
+// interleave mid-statement (node:sqlite is synchronous per call), but two
+// separate invocations can still both read the same pre-transition status
+// before either writes — the classic check-then-act race. These tests
+// don't need real threads to prove the guard: calling the same transition
+// twice in a row exercises exactly the same SQL-level precondition
+// (status = ?) a genuine race would depend on. See db.ts's setTransactionStatus
+// and setDeliverableHash doc comments for the actual fix.
+
+test("db.setTransactionStatus's atomic guard: of two identical calls, only one can apply", () => {
+  const db = freshDb();
+  const buyer = createTestAgent();
+  const seller = createTestAgent();
+  const arbiter = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  for (const a of [buyer, seller, arbiter]) register(db, a);
+  const createFields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_id: arbiter.agentId,
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+
+  // This is the actual race: both calls see the row as 'escrowed' (neither
+  // has re-read after the other's write), so a plain read-then-write
+  // pattern would let both apply. The atomic UPDATE...WHERE status=?
+  // guard means only the first can possibly match.
+  const first = setTransactionStatus(db, tx_id, ["escrowed"], "verified", null);
+  const second = setTransactionStatus(db, tx_id, ["escrowed"], "verified", null);
+  assert.equal(first, true);
+  assert.equal(second, false, "the second identical transition must not also apply");
+  assert.equal(getTransaction(db, tx_id)?.status, "verified");
+});
+
+test("db.setDeliverableHash's atomic guard: the second of two calls cannot overwrite the first hash", () => {
+  const db = freshDb();
+  const buyer = createTestAgent();
+  const seller = createTestAgent();
+  const arbiter = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  for (const a of [buyer, seller, arbiter]) register(db, a);
+  const createFields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_id: arbiter.agentId,
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+
+  const first = setDeliverableHash(db, tx_id, "sha256:first", Date.now());
+  const second = setDeliverableHash(db, tx_id, "sha256:second-should-not-land", Date.now());
+  assert.equal(first, true);
+  assert.equal(second, false);
+  assert.equal(getTransaction(db, tx_id)?.deliverable_hash, "sha256:first");
+});
+
+test("confirm_release called twice for the same tx_id: second call is rejected, not double-applied", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const createFields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_id: arbiter.agentId,
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+  const deliverFields = { tx_id, payee_id: seller.agentId, deliverable_hash: "sha256:result" };
+  escrow.submitDeliverable(db, { ...deliverFields, signature: seller.sign(deliverFields) });
+
+  const reviewPayload = { tx_id, reviewer_id: buyer.agentId, outcome: "satisfied" as const, notes: null };
+  const confirmInput = {
+    tx_id,
+    payer_id: buyer.agentId,
+    signature: buyer.sign({ tx_id, payer_id: buyer.agentId }),
+    review_signature: buyer.sign(reviewPayload),
+  };
+
+  const first = escrow.confirmRelease(db, confirmInput);
+  assert.equal(first.status, "released");
+
+  // The second call would, without the atomicity fix, either double-apply
+  // or throw a raw SQLite UNIQUE-constraint error from the reviews table's
+  // (tx_id, reviewer_id) primary key. It must instead be cleanly rejected
+  // (here, by the existing fast-path status check, since it re-reads the
+  // now-genuinely-updated row — the new atomic guard is the backstop for
+  // when that read itself would have been stale, as in a true race).
+  assert.throws(() => escrow.confirmRelease(db, confirmInput), /has no pending delivery to confirm/);
+
+  // Exactly one review was recorded, not two.
+  const reputation = registry.queryReputation(db, seller.agentId);
+  assert.equal(reputation.tx_count, 1);
+});
+
+test("submit_deliverable called twice for the same tx_id: second call cannot overwrite the first hash", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const createFields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_id: arbiter.agentId,
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+
+  const firstDeliver = { tx_id, payee_id: seller.agentId, deliverable_hash: "sha256:first-result" };
+  escrow.submitDeliverable(db, { ...firstDeliver, signature: seller.sign(firstDeliver) });
+
+  const secondDeliver = { tx_id, payee_id: seller.agentId, deliverable_hash: "sha256:different-result" };
+  assert.throws(
+    () => escrow.submitDeliverable(db, { ...secondDeliver, signature: seller.sign(secondDeliver) }),
+    /is not awaiting delivery/
+  );
+
+  // Confirm the first hash survived untouched — the second call, even
+  // though individually well-formed and correctly signed, must not have
+  // silently overwritten it.
+  const reviewPayload = { tx_id, reviewer_id: buyer.agentId, outcome: "satisfied" as const, notes: null };
+  escrow.confirmRelease(db, {
+    tx_id,
+    payer_id: buyer.agentId,
+    signature: buyer.sign({ tx_id, payer_id: buyer.agentId }),
+    review_signature: buyer.sign(reviewPayload),
+  });
+  // (confirmRelease succeeding at all here proves status correctly stayed
+  // on the single 'verified' transition from the first submit_deliverable
+  // rather than being knocked back to 'escrowed' or duplicated.)
+});
+
+test("submit_deliverable is also rejected once confirm_release has already moved the transaction past 'verified'", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const createFields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_id: arbiter.agentId,
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+  const deliverFields = { tx_id, payee_id: seller.agentId, deliverable_hash: "sha256:result" };
+  escrow.submitDeliverable(db, { ...deliverFields, signature: seller.sign(deliverFields) });
+
+  const reviewPayload = { tx_id, reviewer_id: buyer.agentId, outcome: "satisfied" as const, notes: null };
+  escrow.confirmRelease(db, {
+    tx_id,
+    payer_id: buyer.agentId,
+    signature: buyer.sign({ tx_id, payer_id: buyer.agentId }),
+    review_signature: buyer.sign(reviewPayload),
+  });
+
+  const lateDeliver = { tx_id, payee_id: seller.agentId, deliverable_hash: "sha256:too-late" };
+  assert.throws(
+    () => escrow.submitDeliverable(db, { ...lateDeliver, signature: seller.sign(lateDeliver) }),
+    /is not awaiting delivery/
+  );
+});
+
+test("raise_dispute racing confirm_release: exactly one wins, the other is rejected", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const createFields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_id: arbiter.agentId,
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+  const deliverFields = { tx_id, payee_id: seller.agentId, deliverable_hash: "sha256:result" };
+  escrow.submitDeliverable(db, { ...deliverFields, signature: seller.sign(deliverFields) });
+
+  // confirm_release goes first and wins the 'verified' -> 'released' transition.
+  const reviewPayload = { tx_id, reviewer_id: buyer.agentId, outcome: "satisfied" as const, notes: null };
+  const confirmed = escrow.confirmRelease(db, {
+    tx_id,
+    payer_id: buyer.agentId,
+    signature: buyer.sign({ tx_id, payer_id: buyer.agentId }),
+    review_signature: buyer.sign(reviewPayload),
+  });
+  assert.equal(confirmed.status, "released");
+
+  // raise_dispute arriving just after must not be able to knock an
+  // already-released transaction into 'disputed'.
+  const disputeFields = { tx_id, disputer_id: buyer.agentId, reason: "changed my mind" };
+  assert.throws(
+    () => escrow.raiseDispute(db, { ...disputeFields, signature: buyer.sign(disputeFields) }),
+    /cannot be disputed from status=released/
+  );
+});
+
+test("resolveDispute(slash) called twice for the same disputed tx_id: second call is rejected, stake reduced only once", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const createFields = {
+    payer_id: buyer.agentId,
+    payee_id: seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: "sha256:test",
+    sla_seconds: 30,
+    arbiter_id: arbiter.agentId,
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(buyer, createFields) });
+  const disputeFields = { tx_id, disputer_id: buyer.agentId, reason: "never delivered" };
+  escrow.raiseDispute(db, { ...disputeFields, signature: buyer.sign(disputeFields) });
+
+  const before = registry.queryReputation(db, seller.agentId).stake_amount;
+  const resolvePayload = { agent_id: seller.agentId, tx_id, reason: "confirmed non-delivery" };
+  const resolveInput = {
+    tx_id,
+    outcome: "slash" as const,
+    reason: "confirmed non-delivery",
+    authorizations: [{ arbiter_id: arbiter.agentId, authorization: arbiter.sign(resolvePayload) }],
+  };
+
+  escrow.resolveDispute(db, resolveInput);
+  const afterFirst = registry.queryReputation(db, seller.agentId).stake_amount;
+  assert.ok(afterFirst < before);
+
+  // A second slash for the same tx_id must not reduce stake again — the
+  // transaction is no longer 'disputed', so the atomic guard in
+  // registry-server's slash_stake must reject it before reduceStake runs.
+  assert.throws(() => escrow.resolveDispute(db, resolveInput), /is not disputed/);
+  const afterSecond = registry.queryReputation(db, seller.agentId).stake_amount;
+  assert.equal(afterSecond, afterFirst, "stake must not be reduced twice");
 });
 
 test("raiseDispute then resolveDispute(slash) delegates to the Registry's slash_stake", () => {

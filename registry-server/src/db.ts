@@ -196,10 +196,28 @@ export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
   );
 }
 
-export function setDeliverableHash(db: DatabaseSync, txId: string, deliverableHash: string): void {
-  db.prepare(
-    "UPDATE transactions SET deliverable_hash = ?, delivered_at = ? WHERE tx_id = ?"
-  ).run(deliverableHash, Date.now(), txId);
+/**
+ * Sets the deliverable hash and transitions escrowed -> verified in one
+ * atomic statement, rather than two separate reads-then-writes. Returns
+ * false (no-op) if the transaction wasn't in 'escrowed' status at the
+ * moment of the write — e.g. two concurrent submit_deliverable calls for
+ * the same tx_id, where without this guard both could pass a JS-level
+ * status check (reading the same stale 'escrowed' row) and both write,
+ * silently letting the second call overwrite the first's hash.
+ */
+export function setDeliverableHash(
+  db: DatabaseSync,
+  txId: string,
+  deliverableHash: string,
+  deliveredAt: number
+): boolean {
+  const result = db
+    .prepare(
+      `UPDATE transactions SET deliverable_hash = ?, delivered_at = ?, status = 'verified'
+       WHERE tx_id = ? AND status = 'escrowed'`
+    )
+    .run(deliverableHash, deliveredAt, txId);
+  return result.changes > 0;
 }
 
 export function listVerifiedTransactionsOlderThan(
@@ -213,17 +231,37 @@ export function listVerifiedTransactionsOlderThan(
     .all(deliveredBeforeMs) as unknown as TransactionRow[];
 }
 
+/**
+ * Transitions a transaction's status, but only if it's currently one of
+ * `fromStatuses` — checked and applied in one atomic UPDATE, not a
+ * separate read-then-write. Returns whether the transition actually
+ * happened; callers must treat `false` as "someone else already moved
+ * this transaction," not silently proceed as if their write landed.
+ *
+ * This is the fix for a real concurrency gap: two concurrent tool calls
+ * (e.g. two confirm_release calls for the same tx_id) could previously
+ * both read the same pre-transition status via getTransaction, both pass
+ * their JS-level `if (tx.status !== ...)` check, and both apply their
+ * write and side effects (e.g. both call submit_review) before either
+ * one's UPDATE was visible to the other. Guarding the status in the
+ * UPDATE's WHERE clause closes that window: only the first writer's
+ * statement can match, the second gets changes=0 and must be rejected by
+ * its caller instead of proceeding.
+ */
 export function setTransactionStatus(
   db: DatabaseSync,
   txId: string,
-  status: TransactionStatus,
+  fromStatuses: readonly TransactionStatus[],
+  toStatus: TransactionStatus,
   resolvedAt: number | null
-): void {
-  db.prepare("UPDATE transactions SET status = ?, resolved_at = ? WHERE tx_id = ?").run(
-    status,
-    resolvedAt,
-    txId
-  );
+): boolean {
+  const placeholders = fromStatuses.map(() => "?").join(",");
+  const result = db
+    .prepare(
+      `UPDATE transactions SET status = ?, resolved_at = ? WHERE tx_id = ? AND status IN (${placeholders})`
+    )
+    .run(toStatus, resolvedAt, txId, ...fromStatuses);
+  return result.changes > 0;
 }
 
 export function insertReview(db: DatabaseSync, row: ReviewRow): void {

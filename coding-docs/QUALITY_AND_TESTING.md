@@ -294,7 +294,7 @@ Are tests preserving behavior that no longer exists?
 - [x] A forged signature (real party's payload, wrong party's key) is rejected everywhere a signature is required, not just on the "happy" signer.
 - [x] `slash_stake`/`resolve_dispute(slash)` only succeeds for a registered agent with the `arbitration` capability tag, pre-selected at escrow creation.
 - [x] Stake gating (`required_stake >= K × max_price`) is enforced server-side at registration, not merely documented.
-- [ ] Concurrent/duplicate calls to the same tool with the same `tx_id` (e.g. two `confirm_release` calls racing) — not yet tested; worth adding before this handles anything but toy amounts.
+- [x] Concurrent/duplicate calls to the same tool with the same `tx_id` — fixed at the SQL level: every status transition in `db.ts` is an atomic `UPDATE ... WHERE status = ?`, not a read-then-write, so a losing concurrent call gets `changes: 0` and is rejected rather than silently double-applying. Proven both directly (`db.setTransactionStatus`/`setDeliverableHash` called twice in a row) and through the tool layer (`confirm_release`, `submit_deliverable`, `raise_dispute` vs `confirm_release`, `resolveDispute(slash)`) in `escrow-server/test/escrow.test.ts`.
 
 ## Standing instruction to AI agents
 When adding tests:
