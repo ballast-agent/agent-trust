@@ -7,33 +7,12 @@
 // transport (the SDK's Client/StdioClientTransport), exactly how a real
 // buyer/seller agent would talk to them.
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { createTestAgent, type TestAgent } from "../../registry-server/test/helpers.js";
-
-const REPO_ROOT = resolve(import.meta.dirname, "../..");
-
-function ok(step: string) {
-  console.log(`  ok: ${step}`);
-}
-
-function fail(step: string, detail: unknown): never {
-  console.error(`  FAILED: ${step}`);
-  console.error(detail);
-  process.exit(1);
-}
-
-function cleanEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
-  }
-  return env;
-}
+import { ok, fail, connectServer, callTool } from "./mcp-clients.js";
 
 /** Serves each test agent's manifest JSON on 127.0.0.1 for register_agent to fetch. */
 function startManifestServer(agents: Record<string, TestAgent>): Promise<{ baseUrl: string; close: () => void }> {
@@ -56,28 +35,6 @@ function startManifestServer(agents: Record<string, TestAgent>): Promise<{ baseU
       });
     });
   });
-}
-
-async function connectServer(name: string, dir: string, extraEnv: Record<string, string>): Promise<Client> {
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ["--import", "tsx", "src/server.ts"],
-    cwd: join(REPO_ROOT, dir),
-    env: { ...cleanEnv(), ...extraEnv },
-  });
-  const client = new Client({ name: `demo-${name}-client`, version: "0.1.0" });
-  await client.connect(transport);
-  return client;
-}
-
-async function callTool<T>(client: Client, name: string, args: Record<string, unknown>): Promise<T> {
-  const result = await client.callTool({ name, arguments: args });
-  const content = result.content as Array<{ type: string; text?: string }> | undefined;
-  const text = content?.[0]?.text;
-  if (text === undefined) fail(`${name}: no content returned`, result);
-  const parsed = JSON.parse(text);
-  if (result.isError) fail(`${name}: ${parsed.error ?? JSON.stringify(parsed)}`, parsed);
-  return parsed as T;
 }
 
 async function main() {

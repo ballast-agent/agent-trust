@@ -136,8 +136,41 @@ run the end-to-end demo instead:
 ```bash
 cd demo
 npm install
-npm run e2e   # spawns both MCP servers, drives a real buyer/seller transaction end to end
+npm run e2e         # spawns both MCP servers, drives a real buyer/seller transaction end to end
+npm run dev:check   # faster: just proves both servers boot and share one database correctly
 ```
+
+### Running both services against one shared database
+
+`registry-server` and `escrow-server` speak MCP over **stdio**, which an
+MCP client spawns itself, one process per client — there's no "start both,
+then connect to them later" the way there is with an HTTP port. So the
+"single command" answer here is a client config, not a startup script.
+For an MCP-client app (e.g. Claude Desktop's `claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "agenttrust-registry": {
+      "command": "node",
+      "args": ["--import", "tsx", "src/server.ts"],
+      "cwd": "/absolute/path/to/agent-trust/registry-server",
+      "env": { "REGISTRY_DB_PATH": "/absolute/path/to/agent-trust/shared.db" }
+    },
+    "agenttrust-escrow": {
+      "command": "node",
+      "args": ["--import", "tsx", "src/server.ts"],
+      "cwd": "/absolute/path/to/agent-trust/escrow-server",
+      "env": { "REGISTRY_DB_PATH": "/absolute/path/to/agent-trust/shared.db" }
+    }
+  }
+}
+```
+
+Set up once, both servers auto-start together sharing one database every
+time that client opens — no manual terminals. For a quick CLI-only check
+that both are wired correctly without a full MCP client, use
+`demo/src/dev-check.ts` (`npm run dev:check` above).
 
 ## Are you an AI agent reading this?
 

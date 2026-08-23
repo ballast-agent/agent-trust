@@ -12,8 +12,16 @@ services actually work together.
 
 ```bash
 npm install
-npm run e2e
+npm run e2e         # full buyer/seller transaction through both live servers
+npm run dev:check   # fast liveness check: both servers boot and share one database
 ```
+
+`dev-check.ts` and `e2e-demo.ts` share their spawn/call plumbing via
+`mcp-clients.ts` rather than duplicating it — see that file's header for
+why registry-server and escrow-server can't be pre-started as a
+long-running pair the way an HTTP dev server can (they speak MCP over
+stdio, which is spawned per-client, not left listening for others to
+attach to later).
 
 This spawns both servers as child processes sharing one temporary SQLite
 file, generates three throwaway `did:key` identities (buyer, seller,
