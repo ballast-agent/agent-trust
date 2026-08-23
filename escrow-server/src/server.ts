@@ -28,9 +28,15 @@ server.tool(
   "create_escrow",
   "Locks funds under a new tx_id for a payer/payee pair, with pre-selected arbitration " +
     "(per agent-trust-layer-spec.md §4, chosen at creation time so neither side can shop " +
-    "for a friendlier arbiter later): pass exactly one of arbiter_id (single arbiter) or " +
-    "arbiter_ids (a quorum of exactly 3, resolved by majority vote later). Optionally " +
-    "refuses to escrow if the payee's reputation is below the payer's configured floor.",
+    "for a friendlier arbiter later): pass exactly one of arbiter_id (single arbiter, an " +
+    "explicitly opt-in weaker mode) or arbiter_selection: 'registry_quorum' (escrow-server " +
+    "deterministically picks 3 eligible registered arbiters from registry state neither party " +
+    "controls; resolve_dispute requires majority). BOTH parties must sign the identical " +
+    "payload — signature AND payee_signature — so neither can impose arbiters the other never " +
+    "accepted. Optionally attaches a pre_signed_review — the payer's advance signature over a " +
+    "satisfied review, redeemed by sweep_auto_release ONLY if the transaction actually resolves " +
+    "through that automatic path. Optionally refuses to escrow if the payee's reputation is " +
+    "below the payer's configured floor.",
   {
     payer_id: z.string().min(1),
     payee_id: z.string().min(1),
@@ -39,9 +45,17 @@ server.tool(
     task_hash: z.string().min(1),
     sla_seconds: z.number().int().positive(),
     arbiter_id: z.string().min(1).optional(),
-    arbiter_ids: z.array(z.string().min(1)).length(3).optional(),
+    arbiter_selection: z.literal("registry_quorum").optional(),
     min_payee_reputation: z.number().min(0).max(1).optional(),
     signature: z.string().min(1),
+    payee_signature: z.string().min(1),
+    pre_signed_review: z
+      .object({
+        outcome: z.literal("satisfied"),
+        notes: z.string().optional(),
+        signature: z.string().min(1),
+      })
+      .optional(),
   },
   async (input) => {
     try {
@@ -155,9 +169,9 @@ server.tool(
   "sweep_auto_release",
   "Releases any delivered-but-unconfirmed transactions past the auto-release grace " +
     "window (agent-trust-layer-spec.md §3 step 5). Intended to be called periodically " +
-    "by a scheduler; not built into this prototype. Note: auto-released transactions do " +
-    "not get an automatic review, since the Escrow Layer has no payer signature to offer " +
-    "— see tools.ts's sweepAutoRelease comment.",
+    "by a scheduler; not built into this prototype. If the payer attached a pre_signed_review " +
+    "at create_escrow time, it is redeemed here — only for transactions that actually resolve " +
+    "through this automatic path; see tools.ts's sweepAutoRelease comment.",
   { grace_ms: z.number().int().positive().optional() },
   async ({ grace_ms }) => {
     try {

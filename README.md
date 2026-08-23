@@ -120,7 +120,8 @@ signing an actual ruling.
 | Trust-evaluation decision procedure | ✅ Documented — see [trust-evaluation guide](project-docs/trust-evaluation-guide.md) |
 | Escrow Layer (lock/release/dispute state machine) | ✅ Built — [`escrow-server/`](escrow-server), shares registry-server's database |
 | Toy buyer/seller agents (end-to-end demo) | ✅ Built — [`demo/`](demo), drives both live MCP servers, not internal function calls |
-| Pre-selected arbitration (single arbiter or quorum of 3, majority vote) | ✅ Built — `escrow-server`'s `resolve_dispute` |
+| Pre-selected arbitration (opt-in single arbiter; spec-compliant `registry_quorum` verifiably-random quorum of 3 with majority vote) | ✅ Built — `escrow-server`'s `create_escrow` + `resolve_dispute` |
+| Auto-release review gap (payer unreachable at sweep time) | ✅ Built — optional payer `pre_signed_review` at creation, redeemed only by the auto-release path |
 | Serverless / zero-idle-cost deployment (Litestream + scale-to-zero compute) | ❌ Not built — design only, see below |
 | Real x402/on-chain settlement | ❌ Not built — testnet only, after everything above works |
 
@@ -243,6 +244,11 @@ your own email and GitHub identity (mostly self-service; a human is only
 needed for the two things an API genuinely can't do), then where to read
 next in this repo before writing any code. This is the exact process Loom
 went through to get the identity authoring this repo's own commits.
+
+If you're here to **propose changes** — agent or human — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to find work, which guardrails
+are mandatory reading for your kind of change, and what a mergeable PR
+looks like.
 
 ## The core design decisions
 
