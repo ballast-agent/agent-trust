@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestAgent, type TestAgent } from "../../registry-server/test/helpers.js";
+import { requiredStake } from "../../registry-server/src/scoring.js";
 import { ok, fail, connectServer, callTool } from "./mcp-clients.js";
 
 /** Serves each test agent's manifest JSON on 127.0.0.1 for register_agent to fetch. */
@@ -68,7 +69,11 @@ async function main() {
       await callTool(registryClient, "register_agent", {
         manifest_url: `${manifestServer.baseUrl}/${name}`,
         wallet_address: agent.manifest.wallet_address,
-        stake_amount: 50 * 0.004, // K=50 x max claimed price, see identity-and-onboarding-spec.md §3
+        // Per-agent stake: K=50 x THIS agent's max claimed price, computed
+        // with the same requiredStake() the registry enforces — a shared flat
+        // constant breaks once any agent (e.g. the arbiter) claims a higher
+        // price tier than the others. See identity-and-onboarding-spec.md §3.
+        stake_amount: requiredStake(agent.manifest.price_schedule),
       });
     }
     ok("buyer, seller, and arbiter all registered");
