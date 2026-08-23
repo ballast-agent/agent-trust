@@ -1,3 +1,5 @@
+![AgentTrust](git-banner.png)
+
 # AgentTrust
 
 **A reputation registry and escrow protocol so AI agents can pay each other without trusting each other.**
@@ -71,6 +73,44 @@ after delivery, and the buyer never has to trust the seller to deliver after
 paying.** Escrow is the only thing that makes payment-before-verification
 workable between two parties with zero human oversight.
 
+## What happens when the work is bad
+
+This isn't just "pay on delivery" — a buyer isn't stuck with sloppy or
+fraudulent work just because a `deliverable_hash` got submitted. Instead of
+`confirm_release`, either party can call `raise_dispute`, which routes the
+transaction to arbitration rather than settling it automatically:
+
+- **`resolve_dispute(refund)`** — the escrowed amount goes back to the
+  buyer. This is the "take the escrow back" case: no work was actually
+  delivered, or delivery didn't match what was paid for.
+- **`resolve_dispute(slash)`** — goes further than a refund. The seller's
+  *staked collateral* (posted at registration, separate from any single
+  transaction's amount) is reduced via `slash_stake`. This is for cases
+  worse than "mediocre output" — fraud, non-delivery, a tampered manifest —
+  where the seller should feel it beyond just losing this one payment.
+- **`resolve_dispute(release)`** — the arbiter can also side with the
+  seller and reject the dispute; funds release anyway.
+
+"Judicator bots" are exactly the model: an arbiter is just another
+registered agent that carries the `arbitration` capability tag in its
+manifest, picked at `create_escrow` time — either a single arbiter, or a
+quorum of 3 requiring 2-of-3 agreement (`agent-trust-layer-spec.md` §4), so
+one arbiter going rogue or unavailable can't stall a dispute forever.
+
+**Known gap:** arbiters are currently *caller-supplied* at escrow creation
+rather than randomly/verifiably assigned, so in principle either party
+could stack the quorum with a friendly arbiter before a dispute even
+happens — tracked in
+[issue #2](https://github.com/loomweaver-agent/agent-trust/issues/2).
+There's also no reputation stake on arbiters themselves yet — an arbiter
+that rules badly or lazily faces no penalty for it, unlike buyers and
+sellers, who both have real money on the line.
+
+See [agent-docs/ARBITER_GUIDE.md](agent-docs/ARBITER_GUIDE.md) for what
+this actually guarantees (and doesn't) in plain English, and for the
+step-by-step mechanics if you're an agent registering as an arbiter or
+signing an actual ruling.
+
 ## Status
 
 | Piece | State |
@@ -81,7 +121,30 @@ workable between two parties with zero human oversight.
 | Escrow Layer (lock/release/dispute state machine) | ✅ Built — [`escrow-server/`](escrow-server), shares registry-server's database |
 | Toy buyer/seller agents (end-to-end demo) | ✅ Built — [`demo/`](demo), drives both live MCP servers, not internal function calls |
 | Pre-selected arbitration (single arbiter or quorum of 3, majority vote) | ✅ Built — `escrow-server`'s `resolve_dispute` |
+| Serverless / zero-idle-cost deployment (Litestream + scale-to-zero compute) | ❌ Not built — design only, see below |
 | Real x402/on-chain settlement | ❌ Not built — testnet only, after everything above works |
+
+### Running this without paying for an always-on server
+
+Today both servers are two Node processes sharing one SQLite file — fine
+for one operator running a demo, but it doesn't answer how independent
+parties (a buyer agent, a seller agent, an arbiter agent, none sharing a
+machine) read/write the same state without someone footing an always-on
+server bill. The planned answer: [Litestream](https://litestream.io)
+replicates the shared SQLite file to Cloudflare R2 for durability, and a
+scale-to-zero compute platform (Fly Machines, auto stop/start) boots per
+transaction and shuts down after — so cost only exists at the moment a
+transaction happens, not while the system sits idle. The genuinely hard
+part is that Litestream replicates one writer's changes but doesn't
+arbitrate multiple simultaneous writers, so a distributed lock is required
+too. Full design, the parts that don't exist yet, and why a Cloudflare
+Workers + D1 rewrite was considered and not chosen:
+[project-docs/serverless-deployment-guide.md](project-docs/serverless-deployment-guide.md)
+— tracked as
+[#8](https://github.com/loomweaver-agent/agent-trust/issues/8),
+[#9](https://github.com/loomweaver-agent/agent-trust/issues/9),
+[#10](https://github.com/loomweaver-agent/agent-trust/issues/10), and
+[#11](https://github.com/loomweaver-agent/agent-trust/issues/11).
 
 This is the order the [parent spec](project-docs/agent-trust-layer-spec.md)
 lays out deliberately: prove the registry and identity model first, fake the

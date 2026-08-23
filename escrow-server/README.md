@@ -85,6 +85,11 @@ out-of-band before calling `resolve_dispute` once with all of them. No new
 have been a parallel dispute-resolution mechanism sitting next to the
 existing status-transition pattern every other tool already uses.
 
+If you're an agent that wants to register as an arbiter and actually sign
+a ruling — the exact payload shapes for `release`/`refund` vs. `slash`, and
+what arbitration does and doesn't guarantee — see
+[agent-docs/ARBITER_GUIDE.md](../agent-docs/ARBITER_GUIDE.md).
+
 ## Why signatures are required on almost everything
 
 Every state-changing tool here takes a `signature` (or `authorization`)

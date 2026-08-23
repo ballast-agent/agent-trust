@@ -1,0 +1,157 @@
+# Serverless Deployment: Litestream + Scale-to-Zero Compute
+
+**Status: design only, nothing here is built.** See the tracking issues
+linked at the bottom for the actual implementation work.
+
+## The problem this solves
+
+`registry-server` and `escrow-server` are two Node processes sharing one
+SQLite file (`REGISTRY_DB_PATH`). That's fine for a demo run by one
+operator on one machine, but it doesn't answer the actual "agent web"
+question: how do independent parties (a buyer agent, a seller agent, an
+arbiter agent, none of whom trust each other or share a machine) read and
+write the *same* registry/escrow state without one of them volunteering to
+run — and pay for — an always-on server the others depend on?
+
+The goal here specifically is **zero idle cost**: nobody pays for compute
+sitting around waiting for the next transaction. You only pay (in the
+literal sense, or in free-tier request budget) for the moments a
+transaction is actually happening.
+
+## Why Litestream, and what it actually gives you
+
+[Litestream](https://litestream.io) continuously streams a SQLite file's
+WAL to an object store (S3-compatible — Cloudflare R2, in this design,
+for its free egress and generous free tier) and can restore a file from
+that replica on demand. It solves **durability without a database
+server**: the canonical state lives in R2, not on whatever machine
+happened to run the process last.
+
+**What it does not give you for free: multiple simultaneous writers.**
+Litestream replicates *one* process's WAL stream. It has no concept of two
+independent processes writing to their own local copies of the file at the
+same time and reconciling the result — that's a distributed-systems
+problem Litestream deliberately doesn't solve. Any design that skips this
+and just has "whichever agent wants to transact" independently restore,
+write, and replicate will silently produce two diverging SQLite files the
+moment two transactions overlap. This is the part of the design most
+likely to be underestimated, so it gets its own section below.
+
+## Architecture
+
+```text
+                    ┌─────────────────────────┐
+                    │   Cloudflare R2 bucket   │   ← durable state lives here,
+                    │  (Litestream replica +   │     not on any one machine
+                    │   a tiny lock object)    │
+                    └───────────┬─────────────┘
+                                │ restore / replicate
+                                ▼
+                    ┌─────────────────────────┐
+                    │  scale-to-zero compute   │   ← boots on request,
+                    │  (Fly Machines, auto     │     shuts down after,
+                    │  stop/start)             │     $0 while idle
+                    │                          │
+                    │  1. acquire write lock   │
+                    │  2. litestream restore   │
+                    │  3. run registry-server  │
+                    │     + escrow-server,     │
+                    │     serve the MCP call   │
+                    │  4. litestream replicate │
+                    │  5. release lock, exit   │
+                    └───────────┬─────────────┘
+                                │ MCP over HTTP/SSE
+                                ▼
+                    buyer agent / seller agent / arbiter agent
+                    (each running wherever they run — no shared machine)
+```
+
+## The parts that need to exist (none of them do yet)
+
+### 1. Litestream replication of the shared DB to R2
+
+Mechanical setup: a `litestream.yml` pointing at the SQLite file used by
+`registry-server`/`escrow-server`, replicating continuously to an R2
+bucket. R2 specifically (not S3) for its free egress — every restore pulls
+the whole state back down, and that should never cost anything at
+prototype scale.
+
+### 2. A single-writer lock — the part that actually matters
+
+Since Litestream doesn't arbitrate concurrent writers, something has to
+guarantee only one instance is ever mid-transaction against the DB at a
+time. The cheapest option that needs no new infrastructure: use R2's
+conditional-write support (an `If-None-Match`/`If-Match`-style put) on a
+small lock object as a mutex — an instance must successfully claim the
+lock object before it's allowed to restore-and-serve, and must release
+(delete, or overwrite with an expiry) it when done. A crashed holder needs
+a lock timeout/TTL so the system doesn't wedge forever waiting for a lock
+that will never be released.
+
+This is genuinely the hard part of this design — get it wrong and you get
+silent data loss (two divergent SQLite files, one write clobbering the
+other), not a loud error. It deserves real tests: two instances racing for
+the lock, a lock held past its TTL, a crash mid-transaction leaving a
+stale lock behind.
+
+### 3. Scale-to-zero compute wrapper
+
+The glue script that runs on the compute platform per invocation: acquire
+lock → `litestream restore` → start the two MCP servers (or a lighter
+in-process call into their `tools.ts` functions directly, skipping the MCP
+transport overhead for this internal step) → serve the request →
+`litestream replicate`/checkpoint → release lock → let the platform
+suspend/stop the instance. Fly.io Machines (auto stop/start) is the
+leading candidate compute target because it can run the existing Node
+process essentially unmodified, unlike a rewrite onto Cloudflare Workers
+(see below).
+
+### 4. MCP transport: stdio doesn't fit this model
+
+`registry-server`/`escrow-server` currently speak MCP over stdio, spawned
+1:1 per client process — fine for a single local operator, not for
+independent remote parties triggering on-demand compute. This needs an
+HTTP/SSE MCP transport (which the MCP spec already supports) fronting the
+scale-to-zero wrapper, so a remote agent's tool call is literally the HTTP
+request that wakes the machine up.
+
+## Why not Cloudflare Workers + D1 instead?
+
+That combination (raised earlier in this project's history) is arguably a
+cleaner serverless target long-term, but it requires a much bigger rewrite:
+`node:sqlite`'s synchronous API would need to become D1's async binding
+API throughout `db.ts`, and — more importantly — `identity.ts`'s
+`httpGetPinned()` (added in PR #1 specifically to close a DNS-rebinding
+gap by dialing a pre-resolved IP via raw `node:http`/`node:https` +
+`dns.lookup`) has no equivalent on Workers, which expose no raw sockets or
+`dns.lookup`. The Litestream + scale-to-zero approach keeps the existing
+Node/`node:sqlite`/pinned-socket code intact and only changes *how it's
+invoked and where its data lives* — a smaller, more reviewable change for
+a project this security-sensitive.
+
+## Known limitations of this whole approach, going in
+
+- **Cold-start latency per transaction.** Every transaction pays a
+  restore-then-serve-then-replicate round trip. Fine for a trust-layer
+  prototype; not a design for high-frequency trading.
+- **Single-writer throughput ceiling.** By construction, only one
+  transaction is ever in flight system-wide at a time. Acceptable at
+  prototype scale; a real bottleneck if this ever needs concurrent
+  throughput, at which point this design should be revisited rather than
+  patched further.
+- **This is a cost-shape change, not a security or correctness change.**
+  Everything in `coding-docs/SECURITY_GUARDRAILS.md` and
+  `DATA_AND_STATE.md`'s invariants still has to hold under this model —
+  if anything, the lock-timeout/crash-recovery edge cases below need
+  *more* scrutiny than the current single-process model, not less.
+
+## Tracking issues
+
+- [#8 — Litestream + R2 replication setup](https://github.com/loomweaver-agent/agent-trust/issues/8)
+- [#9 — the single-writer distributed lock](https://github.com/loomweaver-agent/agent-trust/issues/9)
+- [#10 — scale-to-zero compute wrapper (Fly Machines)](https://github.com/loomweaver-agent/agent-trust/issues/10)
+- [#11 — MCP HTTP/SSE transport for both servers](https://github.com/loomweaver-agent/agent-trust/issues/11)
+
+Do these roughly in order — 3/4 (the compute wrapper) depends on 1/4 and
+2/4 existing, and needs 4/4 (HTTP transport) to actually be reachable by a
+remote party rather than just runnable locally.
