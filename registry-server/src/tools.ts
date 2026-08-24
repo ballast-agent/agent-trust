@@ -3,7 +3,6 @@
 // it can be unit tested without a running server — see test/registry.test.ts.
 
 import type { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
 import * as db from "./db.js";
 import {
   fetchAndVerifyManifest,
@@ -14,8 +13,46 @@ import {
   type Manifest,
 } from "./identity.js";
 import { computeReputationScore, requiredStake, type ReviewOutcome } from "./scoring.js";
+import { RateLimitError, SlidingWindowRateLimiter } from "./ratelimit.js";
 
 export class RegistryError extends Error {}
+
+// --- Abuse controls for outbound manifest fetches ---------------------------
+// Both externally-triggered network paths (register_agent's manifest_url
+// fetch, get_manifest's stale-cache refetch) are rate limited per CALLER
+// (wallet_address at registration, agent_id at refetch) and per TARGET HOST,
+// so one caller can't hammer arbitrary third-party hosts through the registry
+// and no single host can be turned into a bottleneck either. Limits chosen
+// generously above honest usage (a handful of registrations/retries a minute)
+// while keeping the registry useless as a request amplifier — rationale in
+// registry-server/README.md. Instances are exported so tests can pre-fill
+// buckets with an injected clock instead of sleeping.
+//
+// In-memory/per-process by design; multi-process deployments would each get
+// their own budget (documented limitation, not worth infra at this scale).
+
+/** Per caller identity: 5 outbound manifest fetches per 60s. */
+export const manifestFetchPerCaller = new SlidingWindowRateLimiter({ maxEvents: 5, windowMs: 60_000 });
+/** Per target hostname: 30 outbound manifest fetches per 60s across all callers. */
+export const manifestFetchPerHost = new SlidingWindowRateLimiter({ maxEvents: 30, windowMs: 60_000 });
+
+function assertHostname(rawUrl: string): string {
+  try {
+    return new URL(rawUrl).hostname;
+  } catch {
+    throw new RegistryError(`manifest_url is not a valid URL: ${rawUrl}`);
+  }
+}
+
+function attemptManifestFetch(callerKey: string | undefined, callerId: string, manifestUrl: string): void {
+  try {
+    if (callerKey !== undefined) manifestFetchPerCaller.attempt(`${callerKey}:${callerId}`);
+    manifestFetchPerHost.attempt(assertHostname(manifestUrl));
+  } catch (err) {
+    if (err instanceof RateLimitError) throw new RegistryError(err.message);
+    throw err;
+  }
+}
 
 // --- register_agent -------------------------------------------------------
 
@@ -27,6 +64,9 @@ export interface RegisterAgentInput {
 }
 
 export async function registerAgent(database: DatabaseSync, input: RegisterAgentInput) {
+  // Rate limit BEFORE the outbound fetch — the whole point is to stop the
+  // network call from happening at all.
+  attemptManifestFetch("wallet", input.wallet_address, input.manifest_url);
   const manifest = await fetchAndVerifyManifest(input.manifest_url);
   return registerVerifiedAgent(database, manifest, input);
 }
@@ -74,6 +114,8 @@ export function registerVerifiedAgent(
     stake_amount: input.stake_amount,
     capability_tags: JSON.stringify(manifest.capability_tags),
     price_schedule: JSON.stringify(manifest.price_schedule),
+    sla_seconds: manifest.sla_seconds,
+    manifest_signature: manifest.signature,
     principal_contact: input.principal_contact ?? null,
     principal_verified: 0,
     manifest_fetched_at: now,
@@ -273,69 +315,37 @@ export async function getManifest(database: DatabaseSync, agentId: string): Prom
   const agent = db.getAgent(database, agentId);
   if (!agent) throw new RegistryError(`unknown agent_id: ${agentId}`);
 
-  const isStale = Date.now() - agent.manifest_fetched_at > MANIFEST_CACHE_TTL_MS;
+  // A row from before sla_seconds/manifest_signature were persisted (see
+  // db.ts's AgentRow doc comment) has nulls here — treat that as
+  // cache-miss-worthy too rather than fabricating a value, so it self-heals
+  // via the normal refetch path below instead of needing a backfill script.
+  const isStale =
+    Date.now() - agent.manifest_fetched_at > MANIFEST_CACHE_TTL_MS ||
+    agent.sla_seconds === null ||
+    agent.manifest_signature === null;
   if (!isStale) {
     return {
       agent_id: agent.agent_id,
       wallet_address: agent.wallet_address,
       capability_tags: JSON.parse(agent.capability_tags),
       price_schedule: JSON.parse(agent.price_schedule),
-      sla_seconds: 0,
-      signature: "",
+      sla_seconds: agent.sla_seconds as number,
+      signature: agent.manifest_signature as string,
     };
   }
 
+  // Only the refetch touches the network, so only the refetch is limited —
+  // fresh cache hits are pure local reads and stay unlimited.
+  attemptManifestFetch("agent", agentId, agent.manifest_url);
   const manifest = await fetchAndVerifyManifest(agent.manifest_url, agentId);
   db.updateAgentManifestCache(
     database,
     agentId,
     JSON.stringify(manifest.capability_tags),
     JSON.stringify(manifest.price_schedule),
+    manifest.sla_seconds,
+    manifest.signature,
     Date.now()
   );
   return manifest;
-}
-
-// --- dev-only seed helper -------------------------------------------------------
-// Not part of the spec's public tool surface. The Escrow Layer (escrow-server/)
-// and the toy buyer/seller agents (demo/e2e-demo.ts) now both exist and
-// produce real settled transactions through the actual MCP protocol — see
-// demo/src/e2e-demo.ts for the genuine end-to-end proof. This helper
-// remains only as a lighter-weight way to seed a settled transaction for
-// this package's own unit tests (registry.test.ts) without spinning up a
-// second MCP server process per test.
-// TODO: once registry.test.ts's submit_review/slash_stake/query_reputation
-// tests are ported to drive transactions through escrow-server's tools
-// directly (in-process, no need for the full demo/ subprocess spawn),
-// delete this export.
-
-export function devSeedSettledTransaction(
-  database: DatabaseSync,
-  params: {
-    payer_id: string;
-    payee_id: string;
-    amount: number;
-    currency: string;
-    task_hash: string;
-    status: Extract<db.TransactionStatus, "released" | "refunded" | "disputed">;
-  }
-) {
-  const tx_id = randomUUID();
-  const now = Date.now();
-  db.insertTransaction(database, {
-    tx_id,
-    payer_id: params.payer_id,
-    payee_id: params.payee_id,
-    amount: params.amount,
-    currency: params.currency,
-    task_hash: params.task_hash,
-    deliverable_hash: null,
-    status: params.status,
-    escrow_deadline: null,
-    arbiter_ids: "[]",
-    created_at: now,
-    delivered_at: null,
-    resolved_at: params.status === "disputed" ? null : now,
-  });
-  return { tx_id };
 }

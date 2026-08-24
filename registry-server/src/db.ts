@@ -25,6 +25,12 @@ export interface AgentRow {
   stake_amount: number;
   capability_tags: string; // JSON array, cached from last verified manifest fetch
   price_schedule: string; // JSON object, cached from last verified manifest fetch
+  // Cached from the same verified manifest fetch as capability_tags/price_schedule.
+  // Nullable only for rows inserted before this column existed — get_manifest
+  // treats a null here as cache-miss-worthy rather than fabricating a value
+  // (see getManifest's isStale check in tools.ts).
+  sla_seconds: number | null;
+  manifest_signature: string | null;
   principal_contact: string | null;
   principal_verified: 0 | 1;
   manifest_fetched_at: number;
@@ -48,6 +54,18 @@ export interface TransactionRow {
   // spec's "randomly-selected quorum of 3." "[]" for transactions created
   // before escrow-server existed (Registry-only test transactions).
   arbiter_ids: string;
+  // Optional JSON blob {"outcome":"satisfied","notes":string|null,"signature":base64}
+  // captured by escrow-server's create_escrow: the payer's advance signature
+  // over a satisfied review ({reviewer_id, outcome, notes, task_hash}),
+  // redeemed by escrow-server's sweep_auto_release ONLY if the transaction
+  // actually resolves through that automatic path. Null when not provided.
+  pre_signed_review: string | null;
+  // For registry_quorum-selected arbiters: hex sha256 seed over inputs
+  // neither transacting party controls alone (server-generated tx_id,
+  // server clock at creation, registry-wide agent count). Stored so the
+  // quorum selection is auditable/recomputable against the arbitration
+  // pool. Null for single-arbiter escrows.
+  arbiter_seed: string | null;
   created_at: number;
   // Set when submitDeliverable moves status to 'verified' — the clock the
   // Escrow Layer's auto-release grace window (spec §3 step 5) counts from.
@@ -72,6 +90,8 @@ CREATE TABLE IF NOT EXISTS agents (
   stake_amount REAL NOT NULL,
   capability_tags TEXT NOT NULL,
   price_schedule TEXT NOT NULL,
+  sla_seconds REAL,
+  manifest_signature TEXT,
   principal_contact TEXT,
   principal_verified INTEGER NOT NULL DEFAULT 0,
   manifest_fetched_at INTEGER NOT NULL,
@@ -90,6 +110,8 @@ CREATE TABLE IF NOT EXISTS transactions (
   status TEXT NOT NULL CHECK (status IN ('pending','escrowed','verified','released','disputed','refunded','slashed')),
   escrow_deadline INTEGER,
   arbiter_ids TEXT NOT NULL DEFAULT '[]',
+  pre_signed_review TEXT,
+  arbiter_seed TEXT,
   created_at INTEGER NOT NULL,
   delivered_at INTEGER,
   resolved_at INTEGER
@@ -112,15 +134,44 @@ CREATE INDEX IF NOT EXISTS idx_reviews_tx ON reviews(tx_id);
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys = ON;");
+  // WAL mode is a hard requirement for Litestream replication (it streams
+  // the WAL file; a rollback-journal db gives it nothing to follow — see
+  // project-docs/serverless-deployment-guide.md) and is also SQLite's own
+  // recommendation for this project's actual access pattern: two processes
+  // sharing one file. Silently stays "memory" for :memory: connections
+  // (SQLite doesn't support WAL there) — safe no-op for every in-memory test.
+  db.exec("PRAGMA journal_mode = WAL;");
   db.exec(SCHEMA);
+  // Additive migrations for database files created before a column existed.
+  // CREATE TABLE IF NOT EXISTS can't add columns to an existing table, and
+  // both services share one file that may predate the column (DATA_AND_STATE.md:
+  // destructive changes need a plan; additive ones just need a guard).
+  const transactionColumns = (
+    db.prepare("PRAGMA table_info(transactions)").all() as { name: string }[]
+  ).map((column) => column.name);
+  for (const addedColumn of ["pre_signed_review", "arbiter_seed"]) {
+    if (!transactionColumns.includes(addedColumn)) {
+      db.exec(`ALTER TABLE transactions ADD COLUMN ${addedColumn} TEXT;`);
+    }
+  }
+  const agentColumns = (
+    db.prepare("PRAGMA table_info(agents)").all() as { name: string }[]
+  ).map((column) => column.name);
+  if (!agentColumns.includes("sla_seconds")) {
+    db.exec(`ALTER TABLE agents ADD COLUMN sla_seconds REAL;`);
+  }
+  if (!agentColumns.includes("manifest_signature")) {
+    db.exec(`ALTER TABLE agents ADD COLUMN manifest_signature TEXT;`);
+  }
   return db;
 }
 
 export function insertAgent(db: DatabaseSync, row: AgentRow): void {
   db.prepare(
     `INSERT INTO agents (agent_id, manifest_url, wallet_address, stake_amount, capability_tags,
-       price_schedule, principal_contact, principal_verified, manifest_fetched_at, created_at, last_active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       price_schedule, sla_seconds, manifest_signature, principal_contact, principal_verified,
+       manifest_fetched_at, created_at, last_active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.agent_id,
     row.manifest_url,
@@ -128,6 +179,8 @@ export function insertAgent(db: DatabaseSync, row: AgentRow): void {
     row.stake_amount,
     row.capability_tags,
     row.price_schedule,
+    row.sla_seconds,
+    row.manifest_signature,
     row.principal_contact,
     row.principal_verified,
     row.manifest_fetched_at,
@@ -145,11 +198,14 @@ export function updateAgentManifestCache(
   agentId: string,
   capabilityTags: string,
   priceSchedule: string,
+  slaSeconds: number,
+  manifestSignature: string,
   fetchedAt: number
 ): void {
   db.prepare(
-    `UPDATE agents SET capability_tags = ?, price_schedule = ?, manifest_fetched_at = ? WHERE agent_id = ?`
-  ).run(capabilityTags, priceSchedule, fetchedAt, agentId);
+    `UPDATE agents SET capability_tags = ?, price_schedule = ?, sla_seconds = ?,
+       manifest_signature = ?, manifest_fetched_at = ? WHERE agent_id = ?`
+  ).run(capabilityTags, priceSchedule, slaSeconds, manifestSignature, fetchedAt, agentId);
 }
 
 export function touchLastActive(db: DatabaseSync, agentId: string, at: number): void {
@@ -162,6 +218,14 @@ export function listAgentsByCapability(db: DatabaseSync, capabilityTag: string):
     const tags = JSON.parse(agent.capability_tags) as string[];
     return tags.includes(capabilityTag);
   });
+}
+
+/** Registry-wide agent count — one of the inputs escrow-server hashes into
+ * its arbiter-quorum seed, since any participant's registrations shift it
+ * and neither transacting party controls it alone. */
+export function countAgents(db: DatabaseSync): number {
+  const row = db.prepare("SELECT COUNT(*) as count FROM agents").get() as { count: number };
+  return row.count;
 }
 
 export function reduceStake(db: DatabaseSync, agentId: string, amount: number): void {
@@ -179,8 +243,9 @@ export function getTransaction(db: DatabaseSync, txId: string): TransactionRow |
 export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
   db.prepare(
     `INSERT INTO transactions (tx_id, payer_id, payee_id, amount, currency, task_hash,
-       deliverable_hash, status, escrow_deadline, arbiter_ids, created_at, delivered_at, resolved_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       deliverable_hash, status, escrow_deadline, arbiter_ids, pre_signed_review,
+       arbiter_seed, created_at, delivered_at, resolved_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.tx_id,
     row.payer_id,
@@ -192,10 +257,18 @@ export function insertTransaction(db: DatabaseSync, row: TransactionRow): void {
     row.status,
     row.escrow_deadline,
     row.arbiter_ids,
+    row.pre_signed_review,
+    row.arbiter_seed,
     row.created_at,
     row.delivered_at,
     row.resolved_at
   );
+}
+
+export function hasReview(db: DatabaseSync, txId: string, reviewerId: string): boolean {
+  return db
+    .prepare("SELECT 1 FROM reviews WHERE tx_id = ? AND reviewer_id = ?")
+    .get(txId, reviewerId) !== undefined;
 }
 
 /**

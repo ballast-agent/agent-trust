@@ -63,11 +63,11 @@ Steps 2 and 3 of the parent spec's prototyping order (§6) are both built
 now: the Escrow Layer ([`../escrow-server/`](../escrow-server), sharing
 this service's database) and the toy buyer/seller agents
 ([`../demo/`](../demo), driving a real transaction through both live MCP
-servers). `tools.ts` still exports `devSeedSettledTransaction` —
-explicitly not part of the public tool surface — purely as a lighter-weight
-way to seed a settled transaction for this package's own unit tests than
-spawning a second MCP server subprocess per test; see the TODO next to it
-for the plan to remove it.
+servers). This package's own unit tests drive real transactions through
+escrow-server's business-logic functions in-process (settled via
+create → deliver → confirm, disputed via raise_dispute) rather than
+seeding transaction rows directly, so every reviewed/slashed state in the
+tests was genuinely earned.
 
 Still missing: step 4, the real x402 smart contract on a testnet, only
 after an external security review.
@@ -82,3 +82,35 @@ DNS-rebinding attacker could previously slip through. TLS SNI and
 certificate identity stay bound to the hostname, redirects are still
 refused rather than followed, and responses are capped (10s timeout, 1MB)
 so an attacker-controlled URL can't hold the registry's resources hostage.
+
+## Rate limits on outbound manifest fetches
+
+Both externally-triggered network paths are rate limited in-process
+(`src/ratelimit.ts`, a sliding-window limiter with an injectable clock —
+no dependencies, no sleeps in tests):
+
+| Budget | Limit | Why |
+| --- | --- | --- |
+| Per caller — `wallet_address` at registration, `agent_id` at refetch | 5 fetches / 60s | An honest agent registers once or twice and occasionally retries; 5/min is far above that, but low enough that a loop can't use the registry as a request amplifier. |
+| Per target hostname (all callers combined) | 30 fetches / 60s | Caps how hard ANY third-party host can be hit through this registry even when many "callers" collude; still generous for a popular manifest host under honest load. |
+
+Design choices worth knowing:
+
+- Limits fire **before** the outbound fetch is attempted — the point is to
+  prevent the network call, not to punish it afterwards. Rejections surface
+  as a clear `RegistryError` ("rate limit exceeded for … retry in ~Ns").
+- **Rejected attempts don't count** toward the budget, so hammering a full
+  key cannot extend its own lockout.
+- Cache hits on `get_manifest` never touch the network and stay unlimited;
+  only the stale-cache refetch path is limited.
+- A cache hit returns the agent's real `sla_seconds` and `signature` from
+  its last verified fetch — both are persisted on the `agents` row at
+  registration/refetch time (`db.ts`'s `sla_seconds`/`manifest_signature`
+  columns), not fabricated. A row from before these columns existed reads
+  back `null` for both, which `getManifest` treats as cache-miss-worthy —
+  it self-heals via the normal refetch path rather than needing a backfill.
+- The limiter is per-process memory. A multi-process deployment would give
+  each process its own budget (effectively multiplying the caps by the
+  process count). That's a documented limitation, not an oversight — real
+  multi-process scale would warrant a shared store, which is exactly the
+  kind of infra this prototype deliberately avoids.

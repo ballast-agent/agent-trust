@@ -1,7 +1,10 @@
 # Serverless Deployment: Litestream + Scale-to-Zero Compute
 
-**Status: design only, nothing here is built.** See the tracking issues
-linked at the bottom for the actual implementation work.
+**Status:** parts 1–2/4 (Litestream replication, the distributed lock) are
+built — see [`deploy/`](../deploy). Parts 3–4 (the scale-to-zero compute
+wrapper, and the HTTP/SSE MCP transport) are still design only, and are
+also what's needed before the lock actually has a caller. See the
+tracking issues linked at the bottom.
 
 ## The problem this solves
 
@@ -68,31 +71,65 @@ likely to be underestimated, so it gets its own section below.
 
 ## The parts that need to exist (none of them do yet)
 
-### 1. Litestream replication of the shared DB to R2
+### 1. Litestream replication of the shared DB to R2 — ✅ built
 
-Mechanical setup: a `litestream.yml` pointing at the SQLite file used by
-`registry-server`/`escrow-server`, replicating continuously to an R2
-bucket. R2 specifically (not S3) for its free egress — every restore pulls
-the whole state back down, and that should never cost anything at
-prototype scale.
+[`deploy/litestream/litestream.yml`](../deploy/litestream/litestream.yml)
+points at the SQLite file used by `registry-server`/`escrow-server`,
+replicating continuously to an R2 bucket (R2 specifically, not raw S3, for
+its free egress — every restore pulls the whole state back down, and that
+should never cost anything at prototype scale). See
+[`deploy/README.md`](../deploy/README.md) for bucket setup.
 
-### 2. A single-writer lock — the part that actually matters
+A genuine prerequisite this surfaced: Litestream replicates by streaming
+the SQLite WAL file, which requires the database to actually be in WAL
+mode — `registry-server/src/db.ts`'s `openDatabase` didn't set this before
+(default rollback-journal mode gives Litestream nothing to follow). Fixed
+by adding `PRAGMA journal_mode = WAL;` unconditionally (safe no-op for
+`:memory:` tests) — which also happens to be SQLite's own recommended mode
+for this project's actual access pattern, and measurably reduced lock
+contention in `escrow-server`'s genuine-concurrency tests once enabled.
 
-Since Litestream doesn't arbitrate concurrent writers, something has to
-guarantee only one instance is ever mid-transaction against the DB at a
-time. The cheapest option that needs no new infrastructure: use R2's
-conditional-write support (an `If-None-Match`/`If-Match`-style put) on a
-small lock object as a mutex — an instance must successfully claim the
-lock object before it's allowed to restore-and-serve, and must release
-(delete, or overwrite with an expiry) it when done. A crashed holder needs
-a lock timeout/TTL so the system doesn't wedge forever waiting for a lock
-that will never be released.
+The replication *mechanism* is proven end to end by
+[`deploy/src/litestream-smoke-test.ts`](../deploy/src/litestream-smoke-test.ts)
+(`npm run smoke-test:litestream` in `deploy/`) using Litestream's local
+`file` replica type — no R2/Cloudflare credentials needed, since Litestream's
+replica backends are interchangeable by design. What's **not** verified is
+the actual R2 config against a real bucket, since this environment has no
+Cloudflare credentials — that still needs a real run before calling this
+production-ready. `deploy/README.md` documents this distinction precisely,
+plus a real Windows-only quirk found while building this (a non-fatal
+directory-fsync error on `litestream restore`).
 
-This is genuinely the hard part of this design — get it wrong and you get
-silent data loss (two divergent SQLite files, one write clobbering the
-other), not a loud error. It deserves real tests: two instances racing for
-the lock, a lock held past its TTL, a crash mid-transaction leaving a
-stale lock behind.
+### 2. A single-writer lock — the part that actually matters — ✅ built
+
+[`deploy/src/distributed-lock.ts`](../deploy/src/distributed-lock.ts) — a
+mutex over R2's conditional-write support, exactly as originally sketched
+here, with one correction: **release is a conditional `PutObject`
+(overwrite with a `released` marker), not a delete** — confirmed against
+[R2's actual API docs](https://developers.cloudflare.com/r2/api/s3/api/)
+that `DeleteObject` supports no conditional headers at all, only
+`PutObject` does. A crashed holder is recovered via TTL: any caller may
+steal an expired-or-released lock through the same conditional-`PutObject`
+path.
+
+This was exactly as hard as flagged — the real design work was the
+backend abstraction (`deploy/src/conditional-store.ts`'s `ConditionalStore`
+interface) that lets the identical algorithm run against a production R2
+backend (`R2ConditionalStore`, using `@aws-sdk/client-s3`) and a test-only
+real-file backend (`LocalFileConditionalStore`, real OS-level atomicity via
+exclusive file creation) without the algorithm itself knowing which one
+it's talking to. All three tests this section originally called for exist
+and pass, plus a fourth: two instances racing for the lock (proven twice —
+once with many concurrent calls in one process, once with 6 genuinely
+independent OS processes via `child_process.fork`, mirroring
+`escrow-server`'s own proven concurrency-test pattern), a lock held past
+its TTL being reclaimable, and a crash mid-transaction (holder never
+releases) not wedging the system. See
+[`deploy/README.md`](../deploy/README.md)'s "The distributed lock" section
+for the honesty boundary: the algorithm and the conditional-store
+abstraction are proven for real; `R2ConditionalStore` has never been run
+against an actual R2 bucket, since this environment has no Cloudflare
+credentials.
 
 ### 3. Scale-to-zero compute wrapper
 

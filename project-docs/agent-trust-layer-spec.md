@@ -214,7 +214,69 @@ Smallest end-to-end slice that proves the concept, roughly in order:
    smart contract on a testnet, and get an external security review before
    anything touches real funds — escrow contracts are exactly the kind of
    thing that gets drained by a subtle reentrancy bug if rushed. This is
-   the next real milestone.
+   the next real milestone. See
+   [issue #22](https://github.com/loomweaver-agent/agent-trust/issues/22)
+   for the concrete checklist of what "everything else being solid" means
+   before starting this.
+
+### Why a blockchain here at all — and why it's step 4, not step 1
+
+It's worth being precise about *which part* of this problem a blockchain
+actually solves, because it's not "trust" in general — it's one specific
+slice of it.
+
+**Where it's a genuinely strong fit:**
+
+- **The counterparty-risk problem is exactly what escrow contracts exist
+  to solve.** "Neither side can safely go first" (see "Why this is hard"
+  in the root README) is the textbook smart-contract use case. Right now,
+  `escrow-server` is itself a trusted third party — whoever runs it
+  *could* edit the SQLite ledger or misreport state, and nothing but
+  "trust the operator" stops that. On-chain escrow removes that trust
+  requirement entirely, which even a well-run centralized version cannot.
+- **Agents genuinely lack normal payment rails.** An agent can't open a
+  bank account or get merchant-processor approval, but it can hold a
+  private key and sign a transaction. For this specific counterparty pair
+  — two agents, no shared bank, no shared jurisdiction, no human in the
+  loop — a public chain plus a stablecoin may not just be convenient; it
+  may be the only payment rail available at all.
+- **Staking/slashing and multisig arbitration already map almost 1:1 onto
+  on-chain primitives.** `resolve_dispute`'s 2-of-3 authorization scheme
+  is structurally identical to an on-chain multisig; `ARBITER_MIN_STAKE`
+  is exactly restaking/slashing logic. Porting the *mechanism* to a chain
+  wouldn't require redesigning it, just re-hosting it.
+
+**Where it doesn't help — the actually hard part of this project:**
+
+A smart contract can enforce "release funds IF valid signatures arrive."
+It cannot independently judge whether a CSV got parsed correctly. **The
+oracle problem — was the delivered work actually good? — is exactly as
+unsolved on-chain as off.** The mass-sybil-arbiter attack found against
+`create_escrow`'s arbiter selection (closed via payee consent + a stake
+floor, see `escrow-server/README.md`'s "Arbitration" section) doesn't go
+away by moving the ledger onto a chain; the identical stake-floor
+reasoning is needed either way. A blockchain solves *custody* trust, not
+*verification* trust — and verification trust is the harder, more
+interesting majority of what this project is actually about.
+
+**The practical objections that justify gating this to step 4:**
+
+- **Fee economics.** At the transaction sizes this project actually
+  targets (`demo/`'s toy transaction is $0.004), L1 gas would dwarf the
+  payment. This only works on a near-zero-fee L2 — see the gas-fee open
+  question below, which isn't a footnote, it's a precondition.
+- **Trustless and patchable are in tension.** No upgrade key means a bug
+  in the money-moving code is permanent and public (the thing that gets
+  agents drained by a reentrancy bug). An upgrade key means someone still
+  holds authority over the funds, undermining the reason to go on-chain in
+  the first place. There's no version of this that gets both properties.
+
+Net read: proving the registry/escrow/arbitration state machine as a
+boring, patchable, off-chain system first — then gating the real chain
+behind everything else being solid *and* an external security review — is
+the correct order, not a stalling tactic. The chain is the last 20%
+(settlement), not the first 80% (the actual trust design this spec is
+about).
 
 ---
 

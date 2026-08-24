@@ -1,7 +1,7 @@
 // Step 3 of project-docs/agent-trust-layer-spec.md: two toy agents (buyer +
 // seller) driving a REAL transaction through registry-server and
-// escrow-server as actual MCP servers speaking the actual protocol — not
-// devSeedSettledTransaction, not calling internal functions directly.
+// escrow-server as actual MCP servers speaking the actual protocol — no
+// seeded test fixtures, and no calls to internal functions directly.
 //
 // Both services are spawned as child processes over the MCP stdio
 // transport (the SDK's Client/StdioClientTransport), exactly how a real
@@ -12,6 +12,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestAgent, type TestAgent } from "../../registry-server/test/helpers.js";
+import { requiredStake } from "../../registry-server/src/scoring.js";
 import { ok, fail, connectServer, callTool } from "./mcp-clients.js";
 
 /** Serves each test agent's manifest JSON on 127.0.0.1 for register_agent to fetch. */
@@ -44,7 +45,7 @@ async function main() {
   console.log("1. Generate buyer/seller/arbiter identities (did:key + signed manifests)");
   const buyer = createTestAgent({ capabilityTags: ["text.translate"], priceSchedule: { "text.translate": "0.004 USDC" } });
   const seller = createTestAgent({ capabilityTags: ["text.translate"], priceSchedule: { "text.translate": "0.004 USDC" } });
-  const arbiter = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0 USDC" } });
+  const arbiter = createTestAgent({ capabilityTags: ["arbitration"], priceSchedule: { arbitration: "0.02 USDC" } });
   ok("three did:key identities generated locally, private keys never leave this process");
 
   console.log("2. Host their manifests locally (demo-only — real agents host these on real HTTPS URLs)");
@@ -68,12 +69,16 @@ async function main() {
       await callTool(registryClient, "register_agent", {
         manifest_url: `${manifestServer.baseUrl}/${name}`,
         wallet_address: agent.manifest.wallet_address,
-        stake_amount: 50 * 0.004, // K=50 x max claimed price, see identity-and-onboarding-spec.md §3
+        // Per-agent stake: K=50 x THIS agent's max claimed price, computed
+        // with the same requiredStake() the registry enforces — a shared flat
+        // constant breaks once any agent (e.g. the arbiter) claims a higher
+        // price tier than the others. See identity-and-onboarding-spec.md §3.
+        stake_amount: requiredStake(agent.manifest.price_schedule),
       });
     }
     ok("buyer, seller, and arbiter all registered");
 
-    console.log("5. Buyer creates escrow for a text.translate task, pre-selecting the arbiter");
+    console.log("5. Buyer AND seller both sign the create (payee consents to the arbiter, issue #2)");
     const createFields = {
       payer_id: buyer.agentId,
       payee_id: seller.agentId,
@@ -86,6 +91,7 @@ async function main() {
     const { tx_id } = await callTool<{ tx_id: string }>(escrowClient, "create_escrow", {
       ...createFields,
       signature: buyer.sign(createFields),
+      payee_signature: seller.sign(createFields),
     });
     ok(`escrow created, tx_id=${tx_id}`);
 

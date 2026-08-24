@@ -1,0 +1,18 @@
+# Production Litestream config — replicates the shared registry/escrow
+# SQLite file to Cloudflare R2. See ../README.md for setup (bucket
+# creation, credentials, running this alongside the two MCP servers) and
+# project-docs/serverless-deployment-guide.md for why R2/Litestream at all.
+#
+# Litestream expands ${VAR} against the environment at load time (pass
+# `-no-expand-env` to disable that, which you never want here). All five
+# variables below are required — see ../README.md for where each comes from.
+dbs:
+  - path: ${AGENTTRUST_DB_PATH}
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_R2_BUCKET}
+        path: agenttrust
+        endpoint: ${LITESTREAM_R2_ENDPOINT}
+        region: auto
+        access-key-id: ${LITESTREAM_R2_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_R2_SECRET_ACCESS_KEY}

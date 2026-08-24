@@ -10,7 +10,7 @@
 // the same SQLite file (see README.md).
 
 import type { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as db from "../../registry-server/src/db.js";
 import { verifySignature, canonicalize } from "../../registry-server/src/identity.js";
 import type { ReviewOutcome } from "../../registry-server/src/scoring.js";
@@ -19,6 +19,22 @@ import * as registry from "../../registry-server/src/tools.js";
 export class EscrowError extends Error {}
 
 const ARBITRATION_TAG = "arbitration";
+const QUORUM_SIZE = 3;
+/**
+ * Minimum stake an arbitration-tagged agent must hold to be eligible for
+ * registry_quorum selection (issue #2's sybil-resistance ask: without an
+ * economic floor, an attacker floods the pool with near-zero-stake sybils
+ * and biases a random draw as effectively as hand-picking did).
+ *
+ * Value rationale: honest arbiters reach it naturally by claiming a paid
+ * arbitration price tier — at the protocol's STAKE_RATIO_K = 50, pricing
+ * arbitration at just 0.02 posts exactly 1.0 — while a free ("0 USDC")
+ * arbiter stakes nothing and is excluded. Flooding a quorum now costs 3+ ×
+ * 1.0 plus a distinct registered identity per sybil, instead of nothing.
+ * Deliberately a plain constant, not a market mechanism; revisit once real
+ * usage data exists.
+ */
+export const ARBITER_MIN_STAKE = 1.0;
 const AUTO_RELEASE_GRACE_MS = 24 * 60 * 60 * 1000; // spec §3 step 5: grace window before auto-release
 
 function requireAgent(database: DatabaseSync, agentId: string, label: string): db.AgentRow {
@@ -47,56 +63,147 @@ export interface CreateEscrowInput {
   currency: string;
   task_hash: string;
   sla_seconds: number;
-  /** Single pre-selected arbiter. Exactly one of arbiter_id / arbiter_ids
-   * must be given — not both, not neither. */
+  /** Single pre-selected arbiter — the explicitly opt-in escape hatch.
+   * Exactly one of arbiter_id / arbiter_selection must be given — not both,
+   * not neither. Does NOT meet spec §4's "no shopping" property (the caller
+   * picked the arbiter themselves); use arbiter_selection for that. */
   arbiter_id?: string;
-  /** A quorum of exactly 3 pre-selected arbiters per
-   * agent-trust-layer-spec.md §4 ("a randomly-selected quorum of 3").
-   * resolve_dispute then requires majority (2 of 3) agreement. */
-  arbiter_ids?: string[];
+  /** Spec-compliant mode ("registry_quorum"): escrow-server deterministically
+   * selects a quorum of exactly 3 from the Registry's registered
+   * arbitration-tagged agents (excluding payer and payee), derived from a
+   * seed over inputs neither party controls alone. resolve_dispute then
+   * requires majority (2 of 3) agreement — agent-trust-layer-spec.md §4. */
+  arbiter_selection?: "registry_quorum";
   /** Payer's configured trust floor — spec §3 step 3: refuse the escrow
    * outright if the payee's reputation is below what the payer requires,
    * rather than accepting funds into an escrow the payer wouldn't approve of. */
   min_payee_reputation?: number;
   /** Payer's signature over the payload actually chosen below — either
-   * {..., arbiter_id} or {..., arbiter_ids}, matching whichever field was
+   * {..., arbiter_id} or {..., arbiter_selection}, matching whichever field was
    * provided, so old single-arbiter callers keep signing exactly what they
    * always signed. Proves the payer actually authorized locking these
    * funds under this specific arbiter set, not just that some caller
    * invoked this tool. */
   signature: string;
+  /** The PAYEE's signature over the exact same payload — both parties must
+   * accept who gets to rule on disputes over this escrow BEFORE funds lock
+   * (issue #2: previously only the payer signed, so a buyer could name three
+   * colluding sybil arbiters and later force a refund/slash against a seller
+   * who never agreed to any of them). Required in both selection modes. */
+  payee_signature: string;
+  /**
+   * Optional payer-signed "satisfied" review, redeemed ONLY by
+   * sweep_auto_release (the automatic release past the grace window).
+   *
+   * Background: confirm_release bundles the payer's release + review
+   * signatures in one call, but sweep_auto_release is genuinely automatic —
+   * no payer is reachable to sign at that point, so historically an
+   * auto-released transaction settled payment with no review attached.
+   * The fix is for the payer to sign the review in advance, here.
+   *
+   * The signature covers {reviewer_id, outcome, notes, task_hash} — the
+   * submitReview payload shape minus tx_id (which doesn't exist yet) plus
+   * task_hash, which binds this review to exactly one escrow so it can't be
+   * replayed onto another. Redemption rules enforced in sweepAutoRelease:
+   * attached only if the transaction's final resolution actually IS the
+   * auto-release path; a dispute/refund/manual-confirm resolution never
+   * redeems it, and an unverifiable stored signature falls back to the old
+   * no-review behavior rather than attaching anything mismatched.
+   */
+  pre_signed_review?: {
+    outcome: "satisfied";
+    notes?: string;
+    signature: string;
+  };
 }
 
-/** Resolves and validates the pre-selected arbiter set, without yet checking
- * each member is a real registered arbitration-tagged agent (see createEscrow). */
-function resolveArbiterSet(input: CreateEscrowInput): string[] {
+/** Resolves which arbitration mode the caller asked for, without yet doing
+ * any registry lookups (see createEscrow). */
+function resolveArbiterMode(
+  input: CreateEscrowInput
+): { mode: "single"; arbiter_id: string } | { mode: "registry_quorum" } {
   const hasSingle = input.arbiter_id !== undefined;
-  const hasQuorum = input.arbiter_ids !== undefined;
+  const hasQuorum = input.arbiter_selection !== undefined;
   if (hasSingle === hasQuorum) {
-    throw new EscrowError("createEscrow requires exactly one of arbiter_id or arbiter_ids");
-  }
-  if (hasSingle) return [input.arbiter_id as string];
-  const ids = input.arbiter_ids as string[];
-  if (ids.length !== 3 || new Set(ids).size !== 3) {
     throw new EscrowError(
-      "arbiter_ids must contain exactly 3 unique agent ids (agent-trust-layer-spec.md §4: quorum of 3)"
+      "createEscrow requires exactly one of arbiter_id (single, opt-in) or arbiter_selection: 'registry_quorum'"
     );
   }
-  return ids;
+  if (input.arbiter_selection !== undefined && input.arbiter_selection !== "registry_quorum") {
+    throw new EscrowError(`unknown arbiter_selection '${input.arbiter_selection}' (only 'registry_quorum' is supported)`);
+  }
+  return hasSingle
+    ? { mode: "single", arbiter_id: input.arbiter_id as string }
+    : { mode: "registry_quorum" };
+}
+
+/** Deterministically selects QUORUM_SIZE arbiters from a pre-sorted pool of
+ * eligible agent ids, using a seed neither transacting party controls alone.
+ *
+ * This is deliberately simple — hash-of-seed indexing without replacement,
+ * not a VRF. Its security story (documented in escrow-server/README.md):
+ * the seed inputs (server-generated tx_id, server clock, registry-wide
+ * agent count) are unknowable to the parties before creation and stored on
+ * the transaction row afterward, so the selection can be audited by
+ * recomputing it, and neither payer nor payee can steer it toward a
+ * specific friendly arbiter.
+ *
+ * Exported for tests: determinism and party-independence are asserted
+ * directly against this function in escrow.test.ts. */
+export function selectArbiterQuorum(seedHex: string, poolAgentIds: string[]): string[] {
+  if (poolAgentIds.length < QUORUM_SIZE) {
+    throw new EscrowError(
+      `arbiter pool has only ${poolAgentIds.length} eligible agent(s); a quorum needs ${QUORUM_SIZE}`
+    );
+  }
+  const remaining = [...poolAgentIds];
+  const picked: string[] = [];
+  const seed = Buffer.from(seedHex, "hex");
+  for (let round = 0; round < QUORUM_SIZE; round++) {
+    const digest = createHash("sha256").update(seed).update(Buffer.from([round])).digest();
+    picked.push(...remaining.splice(digest.readUInt32BE(0) % remaining.length, 1));
+  }
+  return picked.sort();
+}
+
+/** The eligible pool for a registry_quorum selection: every registered
+ * arbitration-tagged agent except the two transacting parties themselves
+ * (spec §4: "a resolver neither party controls"), filtered down to
+ * sybil-resistant members (stake >= ARBITER_MIN_STAKE — see its doc), sorted
+ * so selection order is independent of registration order. */
+function eligibleArbiterPool(database: DatabaseSync, payerId: string, payeeId: string): string[] {
+  return db
+    .listAgentsByCapability(database, ARBITRATION_TAG)
+    .filter((agent) => agent.agent_id !== payerId && agent.agent_id !== payeeId)
+    .filter((agent) => agent.stake_amount >= ARBITER_MIN_STAKE)
+    .map((agent) => agent.agent_id)
+    .sort();
+}
+
+/** Seed over values neither transacting party controls alone:
+ * - tx_id: server-side randomUUID, generated after the request arrives
+ * - created_at: server clock at creation time
+ * - agent count: registry-wide state any participant's registrations move
+ * Stored on the transaction row (arbiter_seed) so the selection remains
+ * auditable/recomputable after the fact. */
+function deriveArbiterSeed(txId: string, createdAtMs: number, database: DatabaseSync): string {
+  return createHash("sha256")
+    .update(`agenttrust/arbiter-quorum-v1|${txId}|${createdAtMs}|${db.countAgents(database)}`)
+    .digest("hex");
+}
+
+function assertArbitrationTagged(agent: db.AgentRow, agentId: string): void {
+  const tags = JSON.parse(agent.capability_tags) as string[];
+  if (!tags.includes(ARBITRATION_TAG)) {
+    throw new EscrowError(`arbiter_id ${agentId} does not have the '${ARBITRATION_TAG}' capability tag`);
+  }
 }
 
 export function createEscrow(database: DatabaseSync, input: CreateEscrowInput) {
   requireAgent(database, input.payer_id, "payer_id");
   requireAgent(database, input.payee_id, "payee_id");
 
-  const arbiterIds = resolveArbiterSet(input);
-  for (const arbiterId of arbiterIds) {
-    const arbiter = requireAgent(database, arbiterId, "arbiter_id");
-    const arbiterTags = JSON.parse(arbiter.capability_tags) as string[];
-    if (!arbiterTags.includes(ARBITRATION_TAG)) {
-      throw new EscrowError(`arbiter_id ${arbiterId} does not have the '${ARBITRATION_TAG}' capability tag`);
-    }
-  }
+  const selection = resolveArbiterMode(input);
 
   const basePayload = {
     payer_id: input.payer_id,
@@ -107,10 +214,58 @@ export function createEscrow(database: DatabaseSync, input: CreateEscrowInput) {
     sla_seconds: input.sla_seconds,
   };
   const payload =
-    input.arbiter_id !== undefined
-      ? { ...basePayload, arbiter_id: input.arbiter_id }
-      : { ...basePayload, arbiter_ids: input.arbiter_ids };
+    selection.mode === "single"
+      ? { ...basePayload, arbiter_id: selection.arbiter_id }
+      : { ...basePayload, arbiter_selection: input.arbiter_selection };
   verifyPartySignature(payload, input.payer_id, input.signature, "createEscrow");
+  // Payee consent over the identical payload — the anti-sybil fix from
+  // issue #2: neither party can impose arbiters the other never accepted.
+  verifyPartySignature(payload, input.payee_id, input.payee_signature, "createEscrow (payee consent)");
+
+  // Validate the pre-signed review NOW rather than at redemption time: an
+  // unfixable signature should fail the escrow creation outright instead of
+  // being silently stored and quietly dropped three weeks later by the sweep.
+  let preSignedReview: string | null = null;
+  if (input.pre_signed_review !== undefined) {
+    if (input.pre_signed_review.outcome !== "satisfied") {
+      throw new EscrowError("pre_signed_review.outcome must be 'satisfied' — the payer is pre-approving the optimistic outcome");
+    }
+    const reviewPayload = {
+      reviewer_id: input.payer_id,
+      outcome: input.pre_signed_review.outcome,
+      notes: input.pre_signed_review.notes ?? null,
+      task_hash: input.task_hash,
+    };
+    verifyPartySignature(
+      reviewPayload,
+      input.payer_id,
+      input.pre_signed_review.signature,
+      "createEscrow pre_signed_review"
+    );
+    preSignedReview = JSON.stringify({
+      outcome: input.pre_signed_review.outcome,
+      notes: input.pre_signed_review.notes ?? null,
+      signature: input.pre_signed_review.signature,
+    });
+  }
+
+  // Resolve the arbiter set AFTER the payer's authorization check: the
+  // payer signs over the MODE they asked for, then the escrow layer either
+  // validates their hand-picked single arbiter or derives the spec's
+  // randomly-selected quorum from registry state neither party controls.
+  const tx_id = randomUUID();
+  const now = Date.now();
+  let arbiterIds: string[];
+  let arbiterSeed: string | null = null;
+  if (selection.mode === "single") {
+    const arbiter = requireAgent(database, selection.arbiter_id, "arbiter_id");
+    assertArbitrationTagged(arbiter, selection.arbiter_id);
+    arbiterIds = [selection.arbiter_id];
+  } else {
+    const pool = eligibleArbiterPool(database, input.payer_id, input.payee_id);
+    arbiterSeed = deriveArbiterSeed(tx_id, now, database);
+    arbiterIds = selectArbiterQuorum(arbiterSeed, pool);
+  }
 
   if (input.min_payee_reputation !== undefined) {
     const reputation = registry.queryReputation(database, input.payee_id);
@@ -123,8 +278,6 @@ export function createEscrow(database: DatabaseSync, input: CreateEscrowInput) {
     }
   }
 
-  const tx_id = randomUUID();
-  const now = Date.now();
   db.insertTransaction(database, {
     tx_id,
     payer_id: input.payer_id,
@@ -136,6 +289,8 @@ export function createEscrow(database: DatabaseSync, input: CreateEscrowInput) {
     status: "escrowed",
     escrow_deadline: now + input.sla_seconds * 1000,
     arbiter_ids: JSON.stringify(arbiterIds),
+    pre_signed_review: preSignedReview,
+    arbiter_seed: arbiterSeed,
     created_at: now,
     delivered_at: null,
     resolved_at: null,
@@ -471,14 +626,59 @@ export function reclaimExpired(database: DatabaseSync, input: ReclaimExpiredInpu
 // spec §3 step 5: "No response from A within a grace window -> auto-release
 // (prevents buyers from freeloading by just never confirming)."
 //
-// Known limitation: this cannot call registry.submitReview on the payer's
-// behalf the way confirmRelease does, because it has no payer signature to
-// offer — the Escrow Layer never holds agent private keys (see
-// identity-and-onboarding-spec.md). An auto-released transaction therefore
-// settles payment without a review attached. A future version could let the
-// payer pre-sign a conditional "satisfied" review at createEscrow time,
-// redeemable only if they never respond — not built here; premature ahead
-// of real usage data on how often this path actually triggers.
+// Reviews on this path: the Escrow Layer never holds agent private keys (see
+// identity-and-onboarding-spec.md), so the sweep cannot sign a review on the
+// payer's behalf the way confirmRelease does. Instead, if the payer supplied
+// a pre_signed_review at createEscrow time, it is redeemed HERE — and only
+// here: redemption requires that the transaction's final resolution actually
+// was this automatic release (status transition verified → released won via
+// the atomic CAS above; dispute/refund/manual-confirm paths never reach it).
+// A stored signature that doesn't verify against the transaction's own
+// task_hash/payer falls back to the old no-review behavior rather than
+// attaching anything mismatched.
+
+/** Redeems a stored pre-signed review for an auto-released transaction.
+ * Best-effort by design: every failure mode degrades to "no review
+ * attached", which is exactly the pre-feature behavior. */
+function redeemPreSignedReview(database: DatabaseSync, txId: string): void {
+  const tx = db.getTransaction(database, txId);
+  if (!tx || !tx.pre_signed_review || !tx.task_hash) return;
+  let stored: { outcome?: unknown; notes?: unknown; signature?: unknown };
+  try {
+    stored = JSON.parse(tx.pre_signed_review) as typeof stored;
+  } catch {
+    return; // corrupt row — degrade to no review
+  }
+  if (
+    typeof stored.signature !== "string" ||
+    stored.outcome !== "satisfied" ||
+    !(typeof stored.notes === "string" || stored.notes === null)
+  ) {
+    return;
+  }
+  const payload = {
+    reviewer_id: tx.payer_id,
+    outcome: stored.outcome,
+    notes: stored.notes,
+    task_hash: tx.task_hash,
+  };
+  try {
+    verifyPartySignature(payload, tx.payer_id, stored.signature, "autoRelease pre-signed review");
+  } catch {
+    return; // signature no longer verifies against this row's facts — attach nothing
+  }
+  if (db.hasReview(database, tx.tx_id, tx.payer_id)) return;
+  const now = Date.now();
+  db.insertReview(database, {
+    tx_id: tx.tx_id,
+    reviewer_id: tx.payer_id,
+    outcome: stored.outcome,
+    notes: stored.notes,
+    signature: stored.signature,
+    signed_at: now,
+  });
+  db.touchLastActive(database, tx.payer_id, now);
+}
 
 export function sweepAutoRelease(database: DatabaseSync, graceMs: number = AUTO_RELEASE_GRACE_MS) {
   const now = Date.now();
@@ -489,7 +689,10 @@ export function sweepAutoRelease(database: DatabaseSync, graceMs: number = AUTO_
     // confirm_release/raise_dispute for the same tx_id between the list
     // query above and this write is a normal outcome for a sweep, not a bug.
     const applied = db.setTransactionStatus(database, tx.tx_id, ["verified"], "released", now);
-    if (applied) released.push(tx.tx_id);
+    if (applied) {
+      released.push(tx.tx_id);
+      redeemPreSignedReview(database, tx.tx_id);
+    }
   }
   return { released_tx_ids: released };
 }
