@@ -158,7 +158,7 @@ security review before anything touches real funds.
 project-docs/
   agent-trust-layer-spec.md        the protocol: data model, registry API, escrow flow, arbitration
   identity-and-onboarding-spec.md  how an agent_id (a did:key) earns the right to be registered
-  trust-evaluation-guide.md        the decision procedure a *buyer* agent runs before trusting anyone
+  trust-evaluation-guide.md        the decision procedure an agent runs before trusting anyone — buyer- and seller-side
 
 registry-server/
   src/                             the Reputation Registry, as an MCP server

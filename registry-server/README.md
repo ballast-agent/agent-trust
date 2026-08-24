@@ -16,7 +16,7 @@ signed by that same key, fetched from a URL the agent controls.
 | Tool | Spec section |
 |---|---|
 | `register_agent` | Verifies manifest signature + stake tier, issues no new identity (agent already generated its own DID) |
-| `query_reputation` | Value-weighted, time-decayed score computed on read — see `src/scoring.ts` |
+| `query_reputation` | Value-weighted, time-decayed score computed on read — see `src/scoring.ts`. Symmetric: aggregates counterparty-authored reviews from *both* seats (as payee and as payer), so it works for evaluating buyers as well as sellers |
 | `query_by_capability` | Filters registered agents by tag/price/reputation |
 | `submit_review` | Only accepted from a party to a *settled* transaction, signature-verified |
 | `slash_stake` | Only accepted from a registered `arbitration`-tagged agent, signature-verified |

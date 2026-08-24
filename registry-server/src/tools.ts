@@ -110,7 +110,17 @@ export function queryReputation(database: DatabaseSync, agentId: string) {
     recent_reviews: reviews
       .sort((a, b) => b.signed_at - a.signed_at)
       .slice(0, 10)
-      .map((r) => ({ tx_id: r.tx_id, outcome: r.outcome, notes: r.notes, signed_at: r.signed_at })),
+      .map((r) => ({
+        tx_id: r.tx_id,
+        // Who authored this review — the counterparty of the queried agent
+        // on that transaction. Matters when an agent operates both seats:
+        // it tells you whether the review judged them as a seller or as a
+        // buyer.
+        reviewer_id: r.reviewer_id,
+        outcome: r.outcome,
+        notes: r.notes,
+        signed_at: r.signed_at,
+      })),
   };
 }
 

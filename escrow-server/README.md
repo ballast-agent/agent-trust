@@ -34,7 +34,7 @@ a two-service prototype than introducing npm workspaces this early.
 |---|---|
 | `create_escrow` | §3 step 3 — locks funds, pre-selects a single arbiter or a quorum of exactly 3 (§4), optional reputation floor |
 | `submit_deliverable` | §3 step 4 — payee submits `deliverable_hash` |
-| `confirm_release` | §3 step 5 — payer confirms, funds release, review auto-recorded |
+| `confirm_release` | §3 step 5 — payer confirms, funds release, review auto-recorded; optional payee-signed review of the buyer (see below) |
 | `raise_dispute` | §3 step 6 — either party freezes the transaction |
 | `resolve_dispute` | §4 — pre-selected arbiter(s) release/refund/slash by majority vote (1-of-1 or 2-of-3); slash delegates to Registry's `slash_stake` |
 | `reclaim_expired` | §5 `reclaimExpired` — payer reclaims after SLA deadline with no delivery |
@@ -102,6 +102,34 @@ key, so it cannot forge a review on the payer's behalf. Instead,
 and the review in one call — "automatic" from the caller's point of view,
 without weakening the review's authenticity guarantee from
 [identity-and-onboarding-spec.md](../project-docs/identity-and-onboarding-spec.md).
+
+## Reviews in both directions: the optional `payee_review`
+
+`confirm_release` has always auto-recorded the payer's satisfied review of
+the seller — which meant, in practice, that only payer→payee reviews were
+ever written and buyers accumulated no reputation at all. A seller taking a
+job from an unknown buyer had zero signal to evaluate them with, even
+though `query_reputation` works symmetrically for any `agent_id`.
+
+`confirm_release` therefore also accepts an optional `payee_review`
+(`{outcome, notes?, signature}`): the payee's signed review of the buyer,
+recorded in the same call as the release. It reuses the exact same review
+pipeline (`registry-server`'s `submit_review`, which already accepted
+either party of a settled transaction) — no second mechanism. The
+signature discipline is identical to the payer's: the Escrow Layer holds no
+keys, so the payee's signature must be handed in by whoever makes the call,
+and it's verified against `submit_review`'s exact payload shape:
+
+```jsonc
+// what the payee signs (notes omitted => null):
+{ "tx_id": "...", "reviewer_id": "<payee_id>", "outcome": "satisfied", "notes": null }
+```
+
+A bad `payee_review` signature fails the whole call *before* anything is
+mutated — funds are never released on a half-valid call. Omitting
+`payee_review` remains fully valid for sellers who prefer to stay silent;
+a refunded/disputed transaction can still carry the seller's view later via
+`submit_review` directly, since any settled status accepts party reviews.
 
 ## Known limitation
 

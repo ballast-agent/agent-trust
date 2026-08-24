@@ -214,6 +214,75 @@ test("query_reputation reflects settled reviews via the decayed scoring formula"
   assert.equal(reputation.dispute_count, 0);
 });
 
+test("query_reputation is symmetric: reviews of a buyer surface too, and never score their author", () => {
+  const db = freshDb();
+  const buyer = createTestAgent();
+  const seller = createTestAgent();
+  for (const a of [buyer, seller]) {
+    tools.registerVerifiedAgent(db, a.manifest, {
+      manifest_url: "https://example.test/manifest.json",
+      wallet_address: a.manifest.wallet_address,
+      stake_amount: requiredStake(a.manifest.price_schedule),
+    });
+  }
+
+  const seed = (taskHash: string) =>
+    tools.devSeedSettledTransaction(db, {
+      payer_id: buyer.agentId,
+      payee_id: seller.agentId,
+      amount: 0.004,
+      currency: "USDC",
+      task_hash: taskHash,
+      status: "released",
+    });
+
+  // Tx 1: the buyer's review of the seller, plus — via the same either-party
+  // pipeline — the seller's review of the buyer.
+  const { tx_id: tx1 } = seed("sha256:tx1");
+  tools.submitReview(db, {
+    tx_id: tx1,
+    reviewer_id: buyer.agentId,
+    outcome: "satisfied",
+    signature: buyer.sign({ tx_id: tx1, reviewer_id: buyer.agentId, outcome: "satisfied" as const, notes: null }),
+  });
+  tools.submitReview(db, {
+    tx_id: tx1,
+    reviewer_id: seller.agentId,
+    outcome: "partial",
+    signature: seller.sign({ tx_id: tx1, reviewer_id: seller.agentId, outcome: "partial" as const, notes: null }),
+  });
+
+  // Tx 2: another seller->buyer review, on a separate transaction. A review
+  // row always judges the reviewer's *counterparty* — the seats determine
+  // who is being scored, so nothing needs a "subject_id" field.
+  const { tx_id: tx2 } = seed("sha256:tx2");
+  tools.submitReview(db, {
+    tx_id: tx2,
+    reviewer_id: seller.agentId,
+    outcome: "satisfied",
+    signature: seller.sign({ tx_id: tx2, reviewer_id: seller.agentId, outcome: "satisfied" as const, notes: null }),
+  });
+
+  const sellerReputation = tools.queryReputation(db, seller.agentId);
+  // Scored ONLY by the buyer's satisfied review of them — the seller's own
+  // two writes (which judge the buyer) must not leak into their own score.
+  assert.equal(sellerReputation.reputation_score, 1);
+  assert.ok(!sellerReputation.recent_reviews.some((r) => r.reviewer_id === seller.agentId));
+
+  const buyerReputation = tools.queryReputation(db, buyer.agentId);
+  assert.equal(buyerReputation.tx_count, 2);
+  // Two equal-value reviews of the buyer (partial + satisfied) average ~0.75.
+  assert.ok(buyerReputation.reputation_score > 0.7 && buyerReputation.reputation_score < 0.8);
+  const reviewsFromSeller = buyerReputation.recent_reviews.filter((r) => r.reviewer_id === seller.agentId);
+  assert.deepEqual(
+    reviewsFromSeller.map((r) => r.outcome).sort(),
+    ["partial", "satisfied"],
+    "both seller-authored judgments of the buyer must surface"
+  );
+  // ...and none of the buyer's own reviews-of-sellers leak into their feed.
+  assert.ok(!buyerReputation.recent_reviews.some((r) => r.reviewer_id === buyer.agentId));
+});
+
 test("slash_stake requires a registered arbitration-capable arbiter with a valid signature", () => {
   const db = freshDb();
   const buyer = createTestAgent();

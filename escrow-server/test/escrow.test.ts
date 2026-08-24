@@ -747,3 +747,194 @@ test("sweepAutoRelease releases delivered-but-unconfirmed transactions past the 
   const result = escrow.sweepAutoRelease(db, -1); // grace of -1ms => already expired
   assert.deepEqual(result.released_tx_ids, [tx_id]);
 });
+
+// --- Payee-side reviews of buyers -------------------------------------------
+// Only payer->payee reviews were ever written in practice, so buyers
+// accumulated no reputation at all and sellers had no signal to evaluate an
+// unknown (or repeat-disputing) buyer. confirm_release now optionally takes
+// a payee-signed review of the buyer, riding the existing review pipeline.
+
+/** Signs a payee_review payload exactly the way submit_review verifies it:
+ * notes omitted => null, matching tools.confirmRelease's pre-verification. */
+function signPayeeReview(payee: TestAgent, fields: {
+  tx_id: string;
+  outcome: "satisfied" | "partial" | "failed";
+  notes?: string;
+}) {
+  return payee.sign({ tx_id: fields.tx_id, reviewer_id: payee.agentId, outcome: fields.outcome, notes: fields.notes ?? null });
+}
+
+function deliverAndRelease(
+  db: ReturnType<typeof freshDb>,
+  parties: { buyer: TestAgent; seller: TestAgent },
+  txId: string,
+  options: { payeeReview?: { outcome: "satisfied" | "partial" | "failed"; notes?: string } } = {}
+) {
+  return escrow.confirmRelease(db, {
+    tx_id: txId,
+    payer_id: parties.buyer.agentId,
+    signature: parties.buyer.sign({ tx_id: txId, payer_id: parties.buyer.agentId }),
+    review_signature: parties.buyer.sign({
+      tx_id: txId,
+      reviewer_id: parties.buyer.agentId,
+      outcome: "satisfied" as const,
+      notes: null,
+    }),
+    ...(options.payeeReview
+      ? { payee_review: { ...options.payeeReview, signature: signPayeeReview(parties.seller, { tx_id: txId, ...options.payeeReview }) } }
+      : {}),
+  });
+}
+
+function runEscrowToEndOfDelivery(
+  db: ReturnType<typeof freshDb>,
+  parties: { buyer: TestAgent; seller: TestAgent; arbiter: TestAgent },
+  taskHash: string
+) {
+  const createFields = {
+    payer_id: parties.buyer.agentId,
+    payee_id: parties.seller.agentId,
+    amount: 0.004,
+    currency: "USDC",
+    task_hash: taskHash,
+    sla_seconds: 30,
+    arbiter_id: parties.arbiter.agentId,
+  };
+  const { tx_id } = escrow.createEscrow(db, { ...createFields, signature: signCreate(parties.buyer, createFields) });
+  const deliverFields = { tx_id, payee_id: parties.seller.agentId, deliverable_hash: "sha256:result" };
+  escrow.submitDeliverable(db, { ...deliverFields, signature: parties.seller.sign(deliverFields) });
+  return tx_id;
+}
+
+test("confirm_release records an optional payee-signed review of the buyer", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const txId = runEscrowToEndOfDelivery(db, { buyer, seller, arbiter }, "sha256:test");
+
+  const result = deliverAndRelease(db, { buyer, seller }, txId, {
+    payeeReview: { outcome: "satisfied" },
+  });
+  assert.equal(result.status, "released");
+  assert.equal(result.payee_review_recorded, true);
+
+  // Both directions landed in the same single review pipeline: two rows for
+  // this tx, one authored per party.
+  assert.equal(countReviewsForTx(db, txId), 2);
+
+  // The seller's review of the buyer shows up when anyone evaluates the
+  // buyer — previously impossible, since only reviews of payees surfaced.
+  const buyerReputation = registry.queryReputation(db, buyer.agentId);
+  assert.equal(buyerReputation.reputation_score, 1);
+  const reviewFromSeller = buyerReputation.recent_reviews.find((r) => r.tx_id === txId && r.reviewer_id === seller.agentId);
+  assert.ok(reviewFromSeller, "buyer's recent_reviews must include the seller's review");
+
+  // And the payer side is untouched: the seller's own score still comes
+  // only from the buyer's review of them.
+  const sellerReputation = registry.queryReputation(db, seller.agentId);
+  assert.equal(sellerReputation.reputation_score, 1);
+});
+
+test("confirm_release accepts a detailed payee_review with notes", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const txId = runEscrowToEndOfDelivery(db, { buyer, seller, arbiter }, "sha256:test");
+
+  deliverAndRelease(db, { buyer, seller }, txId, {
+    payeeReview: { outcome: "partial", notes: "slow to respond, but paid up" },
+  });
+
+  const buyerReputation = registry.queryReputation(db, buyer.agentId);
+  const review = buyerReputation.recent_reviews.find((r) => r.reviewer_id === seller.agentId);
+  assert.equal(review?.outcome, "partial");
+  assert.equal(review?.notes, "slow to respond, but paid up");
+});
+
+test("a forged payee_review rejects the whole call before anything is mutated", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const txId = runEscrowToEndOfDelivery(db, { buyer, seller, arbiter }, "sha256:test");
+
+  // Signed by the buyer instead of the payee — the release must not land.
+  assert.throws(
+    () =>
+      escrow.confirmRelease(db, {
+        tx_id: txId,
+        payer_id: buyer.agentId,
+        signature: buyer.sign({ tx_id: txId, payer_id: buyer.agentId }),
+        review_signature: buyer.sign({ tx_id: txId, reviewer_id: buyer.agentId, outcome: "satisfied" as const, notes: null }),
+        payee_review: {
+          outcome: "satisfied",
+          signature: buyer.sign({ tx_id: txId, reviewer_id: seller.agentId, outcome: "satisfied" as const, notes: null }),
+        },
+      }),
+    /confirmRelease\(payee_review\).*does not match/
+  );
+
+  assert.equal(getTransaction(db, txId)?.status, "verified", "funds must stay escrowed");
+  assert.equal(countReviewsForTx(db, txId), 0, "no review may be written either");
+
+  // The same call without the bad attachment succeeds normally.
+  deliverAndRelease(db, { buyer, seller }, txId);
+  assert.equal(getTransaction(db, txId)?.status, "released");
+  assert.equal(countReviewsForTx(db, txId), 1);
+});
+
+test("omitting payee_review stays valid and records no buyer-side review", () => {
+  const { db, buyer, seller, arbiter } = setUpParties();
+  const txId = runEscrowToEndOfDelivery(db, { buyer, seller, arbiter }, "sha256:test");
+
+  const result = deliverAndRelease(db, { buyer, seller }, txId);
+  assert.equal(result.payee_review_recorded, false);
+  assert.equal(countReviewsForTx(db, txId), 1);
+});
+
+test("a repeat-disputing buyer's history is visible to sellers evaluating them", () => {
+  const { db, buyer, arbiter } = setUpParties();
+  const goodSeller = createTestAgent();
+  const burnedSeller = createTestAgent();
+  for (const a of [goodSeller, burnedSeller]) register(db, a);
+
+  // Tx 1: clean job, seller leaves a satisfied payee review at release time.
+  const tx1 = runEscrowToEndOfDelivery(db, { buyer, seller: goodSeller, arbiter }, "sha256:job-1");
+  deliverAndRelease(db, { buyer, seller: goodSeller }, tx1, { payeeReview: { outcome: "satisfied" } });
+
+  // Tx 2: work delivered, then the buyer disputes anyway to claw back funds.
+  const tx2 = runEscrowToEndOfDelivery(db, { buyer, seller: burnedSeller, arbiter }, "sha256:job-2");
+  const disputeFields = { tx_id: tx2, disputer_id: buyer.agentId, reason: "changed my mind" };
+  escrow.raiseDispute(db, { ...disputeFields, signature: buyer.sign(disputeFields) });
+  const refundPayload = { tx_id: tx2, outcome: "refund" as const, reason: "changed my mind" };
+  escrow.resolveDispute(db, {
+    tx_id: tx2,
+    outcome: "refund",
+    reason: "changed my mind",
+    authorizations: [{ arbiter_id: arbiter.agentId, authorization: arbiter.sign(refundPayload) }],
+  });
+  // Refunded transactions are settled too, so the burned seller can review
+  // the buyer directly through the ordinary pipeline.
+  registry.submitReview(db, {
+    tx_id: tx2,
+    reviewer_id: burnedSeller.agentId,
+    outcome: "failed",
+    signature: burnedSeller.sign({
+      tx_id: tx2,
+      reviewer_id: burnedSeller.agentId,
+      outcome: "failed" as const,
+      notes: null,
+    }),
+  });
+
+  const buyerReputation = registry.queryReputation(db, buyer.agentId);
+  // dispute_count only covers *currently-open* disputes — tx2 already
+  // resolved to 'refunded', so the durable record of this buyer's conduct
+  // is the sellers' authored reviews below, not this counter.
+  assert.equal(buyerReputation.dispute_count, 0);
+  const sellerAuthored = buyerReputation.recent_reviews.filter((r) =>
+    [goodSeller.agentId, burnedSeller.agentId].includes(r.reviewer_id)
+  );
+  assert.deepEqual(
+    sellerAuthored.map((r) => r.outcome).sort(),
+    ["failed", "satisfied"],
+    "both sellers' judgments of the buyer must surface"
+  );
+  // Equal-value satisfied + failed reviews average out to ~0.5 — a number a
+  // seller can actually price risk against, instead of the invisible
+  // "no data" buyers had before.
+  assert.ok(buyerReputation.reputation_score > 0.45 && buyerReputation.reputation_score < 0.55);
+});

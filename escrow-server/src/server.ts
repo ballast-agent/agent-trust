@@ -75,13 +75,23 @@ server.tool(
   "confirm_release",
   "Payer confirms a delivered result, releasing escrowed funds to the payee and " +
     "automatically recording a satisfied review — requires the payer's signature over " +
-    "both the release and the review, since the Escrow Layer never holds agent keys.",
+    "both the release and the review, since the Escrow Layer never holds agent keys. " +
+    "Optionally accepts payee_review: a payee-signed review of the buyer (same " +
+    "signature discipline), so buyers accumulate reputation too and sellers can " +
+    "evaluate them before accepting work.",
   {
     tx_id: z.string().min(1),
     payer_id: z.string().min(1),
     signature: z.string().min(1),
     review_signature: z.string().min(1),
     review_notes: z.string().optional(),
+    payee_review: z
+      .object({
+        outcome: z.enum(["satisfied", "partial", "failed"]),
+        notes: z.string().optional(),
+        signature: z.string().min(1),
+      })
+      .optional(),
   },
   async (input) => {
     try {

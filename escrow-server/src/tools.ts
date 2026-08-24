@@ -13,6 +13,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import * as db from "../../registry-server/src/db.js";
 import { verifySignature, canonicalize } from "../../registry-server/src/identity.js";
+import type { ReviewOutcome } from "../../registry-server/src/scoring.js";
 import * as registry from "../../registry-server/src/tools.js";
 
 export class EscrowError extends Error {}
@@ -182,6 +183,18 @@ export function submitDeliverable(database: DatabaseSync, input: SubmitDeliverab
 
 // --- confirmRelease -------------------------------------------------------
 
+export interface PayeeReviewInput {
+  outcome: ReviewOutcome;
+  notes?: string;
+  /**
+   * The payee's signature over { tx_id, reviewer_id: <payee_id>, outcome,
+   * notes: <notes ?? null> } — the exact payload shape submit_review
+   * verifies against, so this review is indistinguishable from one the
+   * payee submitted directly.
+   */
+  signature: string;
+}
+
 export interface ConfirmReleaseInput {
   tx_id: string;
   payer_id: string;
@@ -198,6 +211,18 @@ export interface ConfirmReleaseInput {
    */
   review_signature: string;
   review_notes?: string;
+  /**
+   * Optional payee-signed review of the buyer, recorded in the same call as
+   * the release. Without it, only payer→payee reviews are ever written and
+   * buyers accumulate no reputation at all — a seller taking a job from an
+   * unknown buyer (or one with a pattern of bad-faith disputes) has no
+   * signal to price that risk. Mirrors the payer's dual-signature pattern:
+   * the Escrow Layer still never holds any agent's keys, so the payee must
+   * hand their signature to whoever makes this call. Omitting it stays
+   * fully valid — a seller who prefers to stay silent (or to review later
+   * via submit_review directly) can.
+   */
+  payee_review?: PayeeReviewInput;
 }
 
 export function confirmRelease(database: DatabaseSync, input: ConfirmReleaseInput) {
@@ -208,6 +233,25 @@ export function confirmRelease(database: DatabaseSync, input: ConfirmReleaseInpu
   }
   if (tx.status !== "verified") {
     throw new EscrowError(`tx_id ${input.tx_id} has no pending delivery to confirm (status=${tx.status})`);
+  }
+
+  // Pre-verify the payee review BEFORE anything mutates: funds can't be
+  // un-released, so a bad payee signature must fail the whole call up front
+  // rather than land the release + payer review and only then error out.
+  // Verified here against submit_review's exact payload shape; the actual
+  // insert below re-verifies through submitReview itself.
+  if (input.payee_review) {
+    verifyPartySignature(
+      {
+        tx_id: input.tx_id,
+        reviewer_id: tx.payee_id,
+        outcome: input.payee_review.outcome,
+        notes: input.payee_review.notes ?? null,
+      },
+      tx.payee_id,
+      input.payee_review.signature,
+      "confirmRelease(payee_review)"
+    );
   }
 
   verifyPartySignature({ tx_id: input.tx_id, payer_id: input.payer_id }, input.payer_id, input.signature, "confirmRelease");
@@ -232,7 +276,27 @@ export function confirmRelease(database: DatabaseSync, input: ConfirmReleaseInpu
     signature: input.review_signature,
   });
 
-  return { ack: true, status: "released" as const };
+  // Same call, same review pipeline (registry.submitReview — not a second
+  // mechanism): the payee's signed judgment of the buyer lands exactly like
+  // the payer's review does. Safe from UNIQUE conflicts: submit_review
+  // refuses non-settled transactions, so while this tx sat at 'verified'
+  // neither party could have inserted a review for it — and the status
+  // transition above is the only writer that moves it to 'released'.
+  if (input.payee_review) {
+    registry.submitReview(database, {
+      tx_id: input.tx_id,
+      reviewer_id: tx.payee_id,
+      outcome: input.payee_review.outcome,
+      notes: input.payee_review.notes,
+      signature: input.payee_review.signature,
+    });
+  }
+
+  return {
+    ack: true,
+    status: "released" as const,
+    payee_review_recorded: input.payee_review !== undefined,
+  };
 }
 
 // --- raiseDispute -------------------------------------------------------

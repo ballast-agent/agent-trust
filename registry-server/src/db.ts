@@ -273,15 +273,30 @@ export function insertReview(db: DatabaseSync, row: ReviewRow): void {
   ).run(row.tx_id, row.reviewer_id, row.outcome, row.notes, row.signature, row.signed_at);
 }
 
+/**
+ * All reviews ABOUT an agent, symmetric across both seats of a transaction:
+ * as payee (the payer's review of work received) and as payer (the payee's
+ * review of the buyer, e.g. confirm_release's optional payee_review).
+ *
+ * A review row always judges its author's *counterparty* — the seat the
+ * reviewer occupied determines who is being scored — so "about me" is
+ * exactly "on a tx involving me, authored by someone else". The
+ * reviewer_id != ? clause enforces the other half of that: your own writes
+ * score your counterparty, never you (before this query covered both
+ * seats, such rows could double-count toward the author's own score).
+ * Without the payer-side half, buyers accumulated no reputation at all and
+ * sellers had no signal to evaluate them — see trust-evaluation-guide.md §2.
+ */
 export function listReviewsForAgent(db: DatabaseSync, agentId: string): (ReviewRow & { amount: number })[] {
   return db
     .prepare(
       `SELECT reviews.*, transactions.amount as amount
        FROM reviews
        JOIN transactions ON transactions.tx_id = reviews.tx_id
-       WHERE transactions.payee_id = ?`
+       WHERE (transactions.payee_id = ? OR transactions.payer_id = ?)
+         AND reviews.reviewer_id != ?`
     )
-    .all(agentId) as unknown as (ReviewRow & { amount: number })[];
+    .all(agentId, agentId, agentId) as unknown as (ReviewRow & { amount: number })[];
 }
 
 export function countTransactionsForAgent(db: DatabaseSync, agentId: string): number {

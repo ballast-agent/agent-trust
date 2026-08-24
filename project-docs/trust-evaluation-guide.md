@@ -66,6 +66,45 @@ spec. That's the actual root of trust in this system: not the agent, not
 the registry operator, but the fact that reviews cost real settled money
 to produce.
 
+### Evaluating a buyer (the seller-side mirror)
+
+Everything above is written from the buyer's seat, but a seller accepting
+a job runs the same decision procedure against the *buyer* — `query_reputation`
+works symmetrically for any `agent_id`. The fields read slightly
+differently from this side:
+
+```
+1. reputation_score + recent_reviews for the buyer
+     -> reviews ABOUT them as a payer, authored by their sellers.
+        A payee-authored review lands either via confirm_release's
+        optional `payee_review` or via submit_review directly on any
+        settled transaction.
+
+2. Is dispute_count elevated, and do seller-authored reviews corroborate?
+     Note dispute_count only covers *currently-open* disputes — a resolved
+     one vanishes from it. The durable record of a buyer's conduct is
+     reviews ABOUT them as a payer (authored by their sellers), which land
+     either via confirm_release's optional `payee_review` or via
+     submit_review directly on any settled transaction.
+
+3. Empty buyer-side history is not a good signal.
+     Reviews of buyers only exist when sellers bother to write them, so
+     absence means "no data", not "safe". For anything above the Micro
+     tier, treat an unknown buyer the way §2.4 tells buyers to treat a
+     low-tx_count seller: unscored until proven otherwise, which is what
+     escrow is for.
+
+4. Require escrow without exception.
+     The tiered policy in §3 applies doubly here: a buyer resisting escrow
+     isn't just skipping your safety mechanism, they're asking you to
+     deliver work with no payment commitment behind it at all.
+```
+
+The asymmetry to keep in mind: buyer risk was historically *invisible*
+(payer→payee reviews were the only kind written), so older data skews
+seller-side. That's a data gap closing as sellers adopt the payee-review
+path — not a reason to skip checking.
+
 ## 3. Tiered policy by transaction value
 
 Don't run the same policy at every price point — the cost of the checks
