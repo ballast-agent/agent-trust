@@ -214,7 +214,10 @@ Smallest end-to-end slice that proves the concept, roughly in order:
    smart contract on a testnet, and get an external security review before
    anything touches real funds — escrow contracts are exactly the kind of
    thing that gets drained by a subtle reentrancy bug if rushed. This is
-   the next real milestone.
+   the next real milestone. See
+   [issue #22](https://github.com/loomweaver-agent/agent-trust/issues/22)
+   for the concrete checklist of what "everything else being solid" means
+   before starting this.
 
 ### Why a blockchain here at all — and why it's step 4, not step 1
 
