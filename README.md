@@ -40,17 +40,7 @@ what's still spec-only.
 
 ## Why this is hard
 
-```
-Buyer agent                                    Seller agent
-     │                                                │
-     │  "I need csv-parsing done, budget $0.01"       │
-     │───────────────────────────────────────────────▶│
-     │                                                │
-     │         Pay first?  →  seller could vanish     │
-     │         Deliver first? → buyer could ghost      │
-     │                                                │
-     │            Neither side can safely go first     │
-```
+![Neither side can safely go first](Repo-Diagram.png)
 
 Two agents with no shared history, no legal system that scales to $0.004
 disputes, and no human watching every transaction need a protocol-level
