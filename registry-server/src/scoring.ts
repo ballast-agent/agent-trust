@@ -58,3 +58,62 @@ export function parsePriceAmount(price: string): number {
   if (!match) throw new Error(`unparseable price: ${price}`);
   return Number.parseFloat(match[1]);
 }
+
+// --- dyad concentration -----------------------------------------------------
+//
+// A purely derived collusion *signal* (issue #20), not a judgment: two
+// colluding agents can trade fake settled transactions back and forth to
+// inflate each other's reputation_score — submit_review only requires a real
+// settled transaction, not an economically meaningful one. A genuine market
+// participant tends to spread settled volume across counterparties; a
+// reciprocal-inflation ring concentrates it in one. This converts "trust the
+// aggregate score" into "inspect this suspicious shape" (trust-evaluation-
+// guide.md §4). Concentration does not prove collusion — a niche specialist
+// can legitimately serve one dominant client.
+
+export interface CounterpartyTx {
+  counterparty_id: string;
+  amount: number;
+}
+
+export interface DyadConcentration {
+  /** The single most frequent settled-transaction counterparty, or null when
+   * the agent has no settled transactions. */
+  top_counterparty_id: string | null;
+  /** Settled transactions with that counterparty. */
+  top_counterparty_tx_count: number;
+  /** Share of the agent's settled transaction COUNT with that counterparty:
+   * 1.0 = every settled tx is with them, 0 = no settled history. */
+  share_by_count: number;
+  /** Same ratio weighted by transaction amount ("volume"). Reported alongside
+   * share_by_count because they fail differently: a ring trading many trivial
+   * txs dilutes value-share by mixing in one real large job; count-share
+   * still catches it, and vice versa. */
+  share_by_value: number;
+}
+
+export function computeDyadConcentration(txs: CounterpartyTx[]): DyadConcentration {
+  if (txs.length === 0) {
+    return { top_counterparty_id: null, top_counterparty_tx_count: 0, share_by_count: 0, share_by_value: 0 };
+  }
+  const byCounterparty = new Map<string, { count: number; amount: number }>();
+  for (const tx of txs) {
+    const entry = byCounterparty.get(tx.counterparty_id) ?? { count: 0, amount: 0 };
+    entry.count += 1;
+    entry.amount += tx.amount;
+    byCounterparty.set(tx.counterparty_id, entry);
+  }
+  let totalAmount = 0;
+  for (const entry of byCounterparty.values()) totalAmount += entry.amount;
+  // Most settled txs wins; ties break by larger amount, then by id, so the
+  // reported counterparty never depends on row ordering.
+  const [top, topEntry] = [...byCounterparty.entries()].sort(
+    (a, b) => b[1].count - a[1].count || b[1].amount - a[1].amount || (a[0] < b[0] ? -1 : 1)
+  )[0];
+  return {
+    top_counterparty_id: top,
+    top_counterparty_tx_count: topEntry.count,
+    share_by_count: topEntry.count / txs.length,
+    share_by_value: totalAmount === 0 ? 0 : topEntry.amount / totalAmount,
+  };
+}

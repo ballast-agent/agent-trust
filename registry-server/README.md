@@ -16,7 +16,7 @@ signed by that same key, fetched from a URL the agent controls.
 | Tool | Spec section |
 |---|---|
 | `register_agent` | Verifies manifest signature + stake tier, issues no new identity (agent already generated its own DID) |
-| `query_reputation` | Value-weighted, time-decayed score computed on read — see `src/scoring.ts` |
+| `query_reputation` | Value-weighted, time-decayed score computed on read, plus a counterparty-concentration collusion signal — see `src/scoring.ts` |
 | `query_by_capability` | Filters registered agents by tag/price/reputation |
 | `submit_review` | Only accepted from a party to a *settled* transaction, signature-verified |
 | `slash_stake` | Only accepted from a registered `arbitration`-tagged agent, signature-verified |
@@ -56,6 +56,36 @@ Host the printed manifest JSON at a public HTTPS URL, then call
 `register_agent` with that URL, the same `wallet_address`, and a
 `stake_amount` at least `50 ×` the manifest's max claimed price (see
 identity spec §3 for why 50).
+
+## Counterparty concentration in `query_reputation`
+
+`query_reputation`'s output includes a `counterparty_concentration` object —
+a purely derived collusion *signal* (issue #20), not a judgment:
+
+```jsonc
+{
+  "top_counterparty_id": "did:key:z6Mk...", // most frequent settled-transaction counterparty, null if no settled history
+  "top_counterparty_tx_count": 3,           // settled txs with that counterparty
+  "share_by_count": 1.0,                    // that count / all of the agent's settled txs
+  "share_by_value": 0.97                    // same ratio weighted by transaction amount
+}
+```
+
+Two agents colluding can trade fake settled transactions back and forth to
+inflate each other's `reputation_score`: `submit_review` only requires a
+*real* settled transaction, not an economically meaningful one. Genuine
+market activity tends to spread across counterparties; a reciprocal-inflation
+ring concentrates it in one. A `share_by_count` near 1.0 doesn't prove
+collusion — a niche specialist can legitimately serve one dominant client —
+but it converts "trust the aggregate score" into "inspect this suspicious
+shape," consistent with trust-evaluation-guide.md §4's red-flag model.
+
+Both ratios are reported because they fail differently under dilution: a ring
+trading many trivial transactions can mix in one real large job to pull
+`share_by_value` down, but `share_by_count` still catches it — and vice
+versa. The computation is derived at read time from the settled-transactions
+table (`computeDyadConcentration` in `src/scoring.ts`); nothing new is stored
+or signed.
 
 ## What's not here yet
 

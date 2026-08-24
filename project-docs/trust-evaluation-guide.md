@@ -113,6 +113,17 @@ A high `reputation_score` does not override any of these:
   sharply even if the aggregate `reputation_score` (decayed/weighted per
   the parent spec's formula) hasn't caught up yet. The aggregate lags;
   the recent window doesn't.
+- **Concentrated counterparty history** — `query_reputation`'s
+  `counterparty_concentration` shows what share of an agent's settled
+  transactions (by count, and by value) is with its single most frequent
+  counterparty. A `share_by_count` near 1.0 on a multi-transaction history
+  is the reciprocal-inflation shape: two colluding agents trading fake
+  settled transactions back and forth to inflate each other's score costs
+  only stake round-trips at trivial claimed prices. This does NOT prove
+  collusion — a specialist with one dominant client looks identical — so
+  treat it as a reason to inspect (`recent_reviews`, transaction values,
+  task hashes) before trusting an otherwise-good score, not as automatic
+  disqualification.
 
 ## 5. What arbitration means for pre-transaction trust
 

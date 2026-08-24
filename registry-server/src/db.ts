@@ -376,3 +376,21 @@ export function countDisputesForAgent(db: DatabaseSync, agentId: string): number
     .get(agentId, agentId) as { count: number };
   return row.count;
 }
+
+/** One row per settled transaction the agent participated in, with the
+ * agent's counterparty in that transaction (the other seat, whichever it
+ * was). The raw input for query_reputation's counterparty-concentration
+ * signal — see computeDyadConcentration in scoring.ts. */
+export function listSettledCounterparties(
+  db: DatabaseSync,
+  agentId: string
+): { counterparty_id: string; amount: number }[] {
+  return db
+    .prepare(
+      `SELECT CASE WHEN payer_id = ? THEN payee_id ELSE payer_id END as counterparty_id,
+              amount
+       FROM transactions
+       WHERE (payer_id = ? OR payee_id = ?) AND status IN ('released','refunded','slashed')`
+    )
+    .all(agentId, agentId, agentId) as unknown as { counterparty_id: string; amount: number }[];
+}

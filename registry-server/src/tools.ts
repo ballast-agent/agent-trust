@@ -12,7 +12,7 @@ import {
   canonicalize,
   type Manifest,
 } from "./identity.js";
-import { computeReputationScore, requiredStake, type ReviewOutcome } from "./scoring.js";
+import { computeDyadConcentration, computeReputationScore, requiredStake, type ReviewOutcome } from "./scoring.js";
 import { RateLimitError, SlidingWindowRateLimiter } from "./ratelimit.js";
 
 export class RegistryError extends Error {}
@@ -146,6 +146,7 @@ export function queryReputation(database: DatabaseSync, agentId: string) {
     reputation_score: reputationScore,
     tx_count: db.countTransactionsForAgent(database, agentId),
     dispute_count: db.countDisputesForAgent(database, agentId),
+    counterparty_concentration: computeDyadConcentration(db.listSettledCounterparties(database, agentId)),
     stake_amount: agent.stake_amount,
     capability_tags: JSON.parse(agent.capability_tags) as string[],
     principal_verified: agent.principal_verified === 1,

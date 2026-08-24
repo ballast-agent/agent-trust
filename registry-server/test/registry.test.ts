@@ -4,7 +4,7 @@ import { openDatabase } from "../src/db.js";
 import * as tools from "../src/tools.js";
 import * as escrow from "../../escrow-server/src/tools.js";
 import { createTestAgent, type TestAgent } from "./helpers.js";
-import { requiredStake, computeReputationScore } from "../src/scoring.js";
+import { requiredStake, computeReputationScore, computeDyadConcentration } from "../src/scoring.js";
 import { SlidingWindowRateLimiter } from "../src/ratelimit.js";
 
 function freshDb() {
@@ -264,6 +264,39 @@ test("query_reputation reflects settled reviews via the decayed scoring formula"
   assert.equal(reputation.dispute_count, 0);
 });
 
+test("counterparty_concentration flags a one-counterparty history and clears a spread-out one", () => {
+  const { db, arbiter } = setUpEscrowParties();
+  const ringBuyer = createTestAgent();
+  const diverseBuyerA = createTestAgent();
+  const diverseBuyerB = createTestAgent();
+  const diverseBuyerC = createTestAgent();
+  const ringedSeller = createTestAgent();
+  const diverseSeller = createTestAgent();
+  for (const a of [ringBuyer, diverseBuyerA, diverseBuyerB, diverseBuyerC, ringedSeller, diverseSeller]) register(db, a);
+
+  // Collusion-ring shape: every settled transaction with ONE counterparty.
+  for (let i = 0; i < 3; i++) settleViaEscrow(db, ringBuyer, ringedSeller, arbiter);
+  const ringed = tools.queryReputation(db, ringedSeller.agentId).counterparty_concentration;
+  assert.equal(ringed.top_counterparty_id, ringBuyer.agentId);
+  assert.equal(ringed.top_counterparty_tx_count, 3);
+  assert.equal(ringed.share_by_count, 1);
+
+  // Genuine-market shape: same volume, spread across three counterparties.
+  settleViaEscrow(db, diverseBuyerA, diverseSeller, arbiter);
+  settleViaEscrow(db, diverseBuyerB, diverseSeller, arbiter);
+  settleViaEscrow(db, diverseBuyerC, diverseSeller, arbiter);
+  const diverse = tools.queryReputation(db, diverseSeller.agentId).counterparty_concentration;
+  assert.equal(diverse.top_counterparty_tx_count, 1);
+  assert.ok(Math.abs(diverse.share_by_count - 1 / 3) < 1e-9);
+
+  // A registered agent with zero settled history has no ratio to show.
+  const freshAgent = createTestAgent();
+  register(db, freshAgent);
+  const none = tools.queryReputation(db, freshAgent.agentId).counterparty_concentration;
+  assert.equal(none.top_counterparty_id, null);
+  assert.equal(none.share_by_count, 0);
+});
+
 test("slash_stake requires a registered arbitration-capable arbiter with a valid signature", () => {
   const { db, buyer, seller, arbiter } = setUpEscrowParties();
   const nonArbiter = createTestAgent();
@@ -309,6 +342,37 @@ test("computeReputationScore weights outcomes by transaction value and decays wi
   );
   // The $100 satisfied review should dominate a $1 failed one.
   assert.ok(score > 0.95);
+});
+
+test("computeDyadConcentration: concentrated history scores ~1, diverse history spreads out", () => {
+  // Every settled tx with the same counterparty — the reciprocal-inflation shape.
+  const ring = computeDyadConcentration([
+    { counterparty_id: "did:key:zPartner", amount: 0.001 },
+    { counterparty_id: "did:key:zPartner", amount: 0.001 },
+    { counterparty_id: "did:key:zPartner", amount: 0.001 },
+  ]);
+  assert.equal(ring.top_counterparty_id, "did:key:zPartner");
+  assert.equal(ring.top_counterparty_tx_count, 3);
+  assert.equal(ring.share_by_count, 1);
+  assert.equal(ring.share_by_value, 1);
+
+  // A genuine market participant spread across three counterparties.
+  const diverse = computeDyadConcentration([
+    { counterparty_id: "did:key:zA", amount: 5 },
+    { counterparty_id: "did:key:zB", amount: 3 },
+    { counterparty_id: "did:key:zC", amount: 2 },
+  ]);
+  assert.equal(diverse.share_by_count, 1 / 3);
+  assert.equal(diverse.share_by_value, 0.5); // largest single value, not most frequent
+
+  // Zero settled history reports nulls/zeros rather than pretending a ratio.
+  const none = computeDyadConcentration([]);
+  assert.deepEqual(none, {
+    top_counterparty_id: null,
+    top_counterparty_tx_count: 0,
+    share_by_count: 0,
+    share_by_value: 0,
+  });
 });
 
 // --- Abuse/rate-limit controls on outbound manifest fetches ------------------
